@@ -82,7 +82,7 @@ import (
 )
 
 const (
-	version = "1.3.0"
+	version = "1.3.1"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -987,7 +987,7 @@ func readUDP(ctx context.Context, u *url.URL, out func([]byte)) error {
 
 func readHTTP(ctx context.Context, src string, out func([]byte)) error {
 	if u, _ := url.Parse(src); u != nil && strings.HasSuffix(strings.ToLower(u.Path), ".m3u8") {
-		return readHLS(ctx, src, out)
+		return readHLSAny(ctx, src, out)
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", src, nil)
 	if err != nil {
@@ -1004,7 +1004,7 @@ func readHTTP(ctx context.Context, src string, out func([]byte)) error {
 	}
 	if ct := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(ct, "mpegurl") {
 		resp.Body.Close()
-		return readHLS(ctx, resp.Request.URL.String(), out)
+		return readHLSAny(ctx, resp.Request.URL.String(), out)
 	}
 	return readStream(ctx, resp.Body, out)
 }
@@ -1060,6 +1060,25 @@ type hlsSegRef struct {
 	method string
 }
 
+var errHLSfMP4 = errors.New("HLS cu segmente fMP4")
+
+// readHLSAny: HLS cu segmente .ts → citire nativă (PID-uri originale).
+// HLS fMP4/CMAF (fără PID-uri) → ffmpeg remux în TS fără recodare, cu PID-uri fixe.
+// Se dă la ffmpeg URL-ul original (master), ca să ia cea mai bună calitate video
+// plus pista audio separată, dacă există.
+func readHLSAny(ctx context.Context, src string, out func([]byte)) error {
+	err := readHLS(ctx, src, out)
+	if !errors.Is(err, errHLSfMP4) {
+		return err
+	}
+	return readExec(ctx, "ffmpeg", []string{"-hide_banner", "-loglevel", "error",
+		"-user_agent", ua, "-rw_timeout", "15000000",
+		"-re", // ritm constant în timp real (altfel ar trimite rafale de câte un segment)
+		"-i", src,
+		"-c", "copy", "-f", "mpegts", "-mpegts_pmt_start_pid", "0x1000", "-mpegts_start_pid", "0x100",
+		"-mpegts_flags", "+resend_headers", "pipe:1"}, out)
+}
+
 func readHLS(ctx context.Context, src string, out func([]byte)) error {
 	al := &Aligner{}
 	plURL := src
@@ -1107,7 +1126,7 @@ func readHLS(ctx context.Context, src string, out func([]byte)) error {
 			case strings.HasPrefix(l, "#EXT-X-ENDLIST"):
 				endlist = true
 			case strings.HasPrefix(l, "#EXT-X-MAP:"):
-				return errors.New("HLS fMP4 nu e suportat (doar segmente .ts)")
+				return errHLSfMP4
 			case strings.HasPrefix(l, "#EXT-X-KEY:"):
 				at := parseAttrs(l[11:])
 				curKey = hlsSegRef{method: at["METHOD"]}
@@ -2309,7 +2328,7 @@ function editCh(id){
   '<label>ID (apare în URL)</label><input type="text" id="f_id" value="'+esc(c.id)+'" placeholder="hd365">'+
   '<label>Nume</label><input type="text" id="f_name" value="'+esc(c.name)+'" placeholder="HD365">'+
   '<label>Intrări (una pe linie, în ordinea priorității — următoarele sunt backup)</label><textarea id="f_in" placeholder="udp://eth0@239.1.1.1:1234">'+esc((c.inputs||[]).join('\n'))+'</textarea>'+
-  '<div class="hint"><code>udp://[iface@]239.1.1.1:1234</code> · <code>rtp://@239.1.1.1:5000</code> · <code>udp://0.0.0.0:5000</code><br><code>http://server/stream.ts</code> · <code>http://server/live.m3u8</code><br><code>srt://host:9000?mode=caller</code> · <code>srt://:9000?mode=listener</code><br><code>rtmp://host/app/key</code> · <code>rtmp-listen://0.0.0.0:1935/live/key</code><br>UDP/RTP/HTTP/HLS/SRT păstrează PID-urile originale. RTMP nu are PID-uri: primește video 0x100, audio 0x101, PMT 0x1000.</div>'+
+  '<div class="hint"><code>udp://[iface@]239.1.1.1:1234</code> · <code>rtp://@239.1.1.1:5000</code> · <code>udp://0.0.0.0:5000</code><br><code>http://server/stream.ts</code> · <code>http://server/live.m3u8</code><br><code>srt://host:9000?mode=caller</code> · <code>srt://:9000?mode=listener</code><br><code>rtmp://host/app/key</code> · <code>rtmp-listen://0.0.0.0:1935/live/key</code><br>UDP/RTP/HTTP/HLS(.ts)/SRT păstrează PID-urile originale. RTMP și HLS fMP4 nu au PID-uri: primesc video 0x100, audio 0x101, PMT 0x1000 (prin ffmpeg).</div>'+
   '<label>Ieșire UDP (opțional)</label><input type="text" id="f_udp" value="'+esc(c.udp)+'" placeholder="udp://eth1@239.10.0.1:1234?ttl=8">'+
   '<div class="chk"><label><input type="checkbox" id="f_en"'+(c.enabled?' checked':'')+'> Activ</label><label><input type="checkbox" id="f_http"'+(c.http?' checked':'')+'> HTTP-TS</label><label><input type="checkbox" id="f_hls"'+(c.hls?' checked':'')+'> HLS</label><label><input type="checkbox" id="f_pub"'+(c.public?' checked':'')+'> Public (fără token)</label></div>'+
   '<div class="msg" id="f_msg"></div><div class="foot"><button onclick="closeM()">Anulează</button><button class="pri" onclick="saveCh(\''+esc(n?'':c.id)+'\')">Salvează</button></div>');

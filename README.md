@@ -32,6 +32,7 @@ pune `streamhub.exe` într-un folder fix (ex. `C:\StreamHub`) și dă dublu-clic
 | RTP | `rtp://@239.1.1.1:5000` | da |
 | HTTP-TS | `http://server/stream.ts` | da |
 | HLS (segmente .ts, AES-128) | `http://server/live.m3u8` | da |
+| HLS fMP4 / CMAF (detectat automat, prin ffmpeg, fără recodare) | `https://server/live/master.m3u8` | nu — fMP4 nu are PID-uri (video 0x100, audio 0x101, PMT 0x1000) |
 | SRT | `srt://host:9000?mode=caller`, `srt://:9000?mode=listener` | da |
 | RTMP pull / push | `rtmp://host/app/key`, `rtmp-listen://0.0.0.0:1935/live/key` | nu — RTMP nu are PID-uri (video 0x100, audio 0x101, PMT 0x1000) |
 
@@ -71,4 +72,4 @@ Exemplu de configurare: [`config.example.json`](config.example.json). Loguri: `j
 
 ## Limitări
 
-Fără plăci DVB, fără decriptare CAM, fără HLS fMP4 la intrare.
+Fără plăci DVB, fără decriptare CAM.

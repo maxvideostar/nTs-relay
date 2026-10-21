@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	version = "1.3.0"
+	version = "1.3.1"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -938,7 +938,7 @@ func readUDP(ctx context.Context, u *url.URL, out func([]byte)) error {
 
 func readHTTP(ctx context.Context, src string, out func([]byte)) error {
 	if u, _ := url.Parse(src); u != nil && strings.HasSuffix(strings.ToLower(u.Path), ".m3u8") {
-		return readHLS(ctx, src, out)
+		return readHLSAny(ctx, src, out)
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", src, nil)
 	if err != nil {
@@ -955,7 +955,7 @@ func readHTTP(ctx context.Context, src string, out func([]byte)) error {
 	}
 	if ct := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(ct, "mpegurl") {
 		resp.Body.Close()
-		return readHLS(ctx, resp.Request.URL.String(), out)
+		return readHLSAny(ctx, resp.Request.URL.String(), out)
 	}
 	return readStream(ctx, resp.Body, out)
 }
@@ -1011,6 +1011,25 @@ type hlsSegRef struct {
 	method string
 }
 
+var errHLSfMP4 = errors.New("HLS cu segmente fMP4")
+
+// readHLSAny: HLS cu segmente .ts → citire nativă (PID-uri originale).
+// HLS fMP4/CMAF (fără PID-uri) → ffmpeg remux în TS fără recodare, cu PID-uri fixe.
+// Se dă la ffmpeg URL-ul original (master), ca să ia cea mai bună calitate video
+// plus pista audio separată, dacă există.
+func readHLSAny(ctx context.Context, src string, out func([]byte)) error {
+	err := readHLS(ctx, src, out)
+	if !errors.Is(err, errHLSfMP4) {
+		return err
+	}
+	return readExec(ctx, "ffmpeg", []string{"-hide_banner", "-loglevel", "error",
+		"-user_agent", ua, "-rw_timeout", "15000000",
+		"-re", // ritm constant în timp real (altfel ar trimite rafale de câte un segment)
+		"-i", src,
+		"-c", "copy", "-f", "mpegts", "-mpegts_pmt_start_pid", "0x1000", "-mpegts_start_pid", "0x100",
+		"-mpegts_flags", "+resend_headers", "pipe:1"}, out)
+}
+
 func readHLS(ctx context.Context, src string, out func([]byte)) error {
 	al := &Aligner{}
 	plURL := src
@@ -1058,7 +1077,7 @@ func readHLS(ctx context.Context, src string, out func([]byte)) error {
 			case strings.HasPrefix(l, "#EXT-X-ENDLIST"):
 				endlist = true
 			case strings.HasPrefix(l, "#EXT-X-MAP:"):
-				return errors.New("HLS fMP4 nu e suportat (doar segmente .ts)")
+				return errHLSfMP4
 			case strings.HasPrefix(l, "#EXT-X-KEY:"):
 				at := parseAttrs(l[11:])
 				curKey = hlsSegRef{method: at["METHOD"]}
