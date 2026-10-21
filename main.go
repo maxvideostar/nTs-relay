@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	version = "1.2.0"
+	version = "1.2.1"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -1594,6 +1594,11 @@ func (c *Channel) hlsTouch(ip, ua string, n uint64) {
 	key := ip + "|" + ua // mai mulți playeri în spatele aceluiași IP
 	h := c.hlsSeen[key]
 	if h == nil {
+		if n == 0 {
+			// doar playlist cerut, fără segmente → nu e încă un client real
+			c.subMu.Unlock()
+			return
+		}
 		h = &hlsClient{first: time.Now(), ua: ua}
 		c.hlsSeen[key] = h
 	}
