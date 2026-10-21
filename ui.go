@@ -21,7 +21,7 @@ button.sm{padding:3px 9px;font-size:12px}
 main{padding:16px 20px 40px;max-width:1400px;margin:0 auto}
 .ch{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:8px;overflow:hidden}
 .ch.dis{opacity:.55}
-.row{display:grid;grid-template-columns:14px minmax(160px,1.3fr) minmax(180px,2fr) 110px 80px 70px auto;gap:14px;align-items:center;padding:11px 14px;cursor:pointer}
+.row{display:grid;grid-template-columns:14px minmax(160px,1.3fr) minmax(160px,2fr) 110px 110px 70px 70px auto;gap:14px;align-items:center;padding:11px 14px;cursor:pointer}
 .row:hover{background:var(--panel2)}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--mut)}
 .dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(46,194,126,.15)}
@@ -63,7 +63,7 @@ input:focus,textarea:focus{outline:none;border-color:var(--acc)}
 .hint code{font-family:var(--mono);color:#aab4c3}
 .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 .msg{color:var(--bad);font-size:13px;margin-top:10px}
-@media(max-width:900px){header{padding:10px 14px;gap:10px}.brand{flex:1}#sum{order:3;flex-basis:100%;gap:6px 14px;font-size:12px}main{padding:12px 12px 32px}.row{grid-template-columns:12px 1fr 90px;row-gap:6px}.in,.row .num:nth-child(5),.row .num:nth-child(6){display:none}.ops{grid-column:1/-1}.cols{grid-template-columns:1fr}}
+@media(max-width:900px){header{padding:10px 14px;gap:10px}.brand{flex:1}#sum{order:3;flex-basis:100%;gap:6px 14px;font-size:12px}main{padding:12px 12px 32px}.row{grid-template-columns:12px 1fr 90px;row-gap:6px}.in,.row .num:nth-child(5),.row .num:nth-child(6),.row .num:nth-child(7){display:none}.ops{grid-column:1/-1}.cols{grid-template-columns:1fr}}
 </style></head><body>
 <header>
   <div class="brand">Stream<span>Hub</span></div>
@@ -87,9 +87,9 @@ function outs(c){var b=location.origin,q=(!c.public&&tok())?'?token='+encodeURIC
   if(c.http)r.push(['HTTP',b+'/play/'+c.id+q]);if(c.hls)r.push(['HLS',b+'/hls/'+c.id+'/index.m3u8'+q]);if(c.udp)r.push(['UDP',c.udp]);return r;}
 function tog(id){opened[id]=!opened[id];render();}
 function render(){
-  if(!st)return;var L=document.getElementById('list'),h='',on=0,en=0,bw=0,cl=0,cc=0;
+  if(!st)return;var L=document.getElementById('list'),h='',on=0,en=0,bw=0,ob=0,cl=0,cc=0;
   st.channels.forEach(function(c){
-    if(c.enabled)en++;if(c.online)on++;bw+=c.kbps||0;cl+=c.clients.length;cc+=c.cc||0;
+    if(c.enabled)en++;if(c.online)on++;bw+=c.kbps||0;ob+=c.out_kbps||0;cl+=c.clients.length;cc+=c.cc||0;
     var cls=c.enabled?(c.online?'ok':'bad'):'',tags='';
     if(c.input_idx>0&&c.online)tags+='<span class="tag w">backup #'+(c.input_idx+1)+'</span>';
     if(c.scrambled)tags+='<span class="tag r">criptat</span>';
@@ -99,6 +99,7 @@ function render(){
     h+='<div class="nm"><b>'+esc(c.name||c.id)+tags+'</b><small>'+esc(c.id)+(c.service?' · '+esc(c.service):'')+'</small></div>';
     h+='<div class="in"><small>Intrare'+(c.inputs&&c.inputs.length>1?' ('+(c.input_idx+1)+'/'+c.inputs.length+')':'')+'</small><div>'+esc(c.input||(c.inputs&&c.inputs[0])||'—')+'</div></div>';
     h+='<div class="num">'+(c.online?rate(c.kbps):'<span class="bad-t">'+(c.enabled?'offline':'—')+'</span>')+'<small>'+(c.online?'activ '+dur(c.uptime):'')+'</small></div>';
+    h+='<div class="num">'+(c.online||c.out_kbps?rate(c.out_kbps||0):'—')+'<small>ieșire</small></div>';
     h+='<div class="num'+(c.cc?' warn-t':'')+'">'+(c.cc||0)+'<small>erori CC</small></div>';
     h+='<div class="num">'+c.clients.length+'<small>clienți</small></div>';
     h+='<div class="ops" onclick="event.stopPropagation()"><button class="sm" onclick="editCh(\''+esc(c.id)+'\')">Editează</button><button class="sm" onclick="restartCh(\''+esc(c.id)+'\')">Repornește</button><button class="sm dng" onclick="delCh(\''+esc(c.id)+'\')">Șterge</button></div></div>';
@@ -110,13 +111,13 @@ function render(){
       c.pids.forEach(function(p){h+='<tr><td>'+hex(p.pid)+' <span style="color:var(--mut)">'+p.pid+'</span></td><td class="t k-'+p.kind+'">'+esc(p.type)+(p.scrambled?' <span class="tag r">criptat</span>':'')+'</td><td>'+esc(p.lang||'')+'</td><td style="text-align:right">'+rate(p.kbps)+'</td><td style="text-align:right"'+(p.cc?' class="warn-t"':'')+'>'+p.cc+'</td></tr>';});
       h+='</table>';}else h+='<div class="hint">Fără date.</div>';
     h+='</div><div><h4>Clienți</h4>';
-    if(c.clients.length){h+='<table>';c.clients.forEach(function(x){h+='<tr><td>'+esc(x.addr)+'</td><td class="t">'+x.type+'</td><td style="text-align:right">'+(x.type==='HTTP'?dur(x.secs):'')+'</td></tr>';});h+='</table>';}else h+='<div class="hint">Niciun client conectat.</div>';
+    if(c.clients.length){h+='<table>';c.clients.forEach(function(x){h+='<tr><td>'+esc(x.addr)+'</td><td class="t">'+x.type+'</td><td style="text-align:right">'+rate(x.kbps||0)+'</td><td style="text-align:right">'+(x.type==='HTTP'?dur(x.secs):'')+'</td></tr>';});h+='</table>';}else h+='<div class="hint">Niciun client conectat.</div>';
     if(c.hls)h+='<div class="hint" style="margin-top:10px">Segmente HLS în memorie: '+c.hls_segs+'</div>';
     if(c.switches)h+='<div class="hint">Comutări sursă: '+c.switches+'</div>';
     h+='</div></div></div></div>';
   });
   L.innerHTML=h||'<div class="empty">Niciun canal. Apasă <b>+ Canal</b> ca să adaugi primul.</div>';
-  document.getElementById('sum').innerHTML='<span>Online <b>'+on+'/'+en+'</b></span><span>Trafic intrare <b>'+rate(bw)+'</b></span><span>Clienți <b>'+cl+'</b></span><span>Erori CC <b>'+cc+'</b></span><span>Uptime <b>'+dur(st.uptime)+'</b></span>';
+  document.getElementById('sum').innerHTML='<span>Online <b>'+on+'/'+en+'</b></span><span>Intrare <b>'+rate(bw)+'</b></span><span>Ieșire <b>'+rate(ob)+'</b></span><span>Clienți <b>'+cl+'</b></span><span>Erori CC <b>'+cc+'</b></span><span>Uptime <b>'+dur(st.uptime)+'</b></span>';
 }
 function cp(b,t){var done=function(){b.textContent='Copiat';setTimeout(function(){b.textContent='Copiază';},1200);};
   if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(t).then(done);else{var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();document.execCommand('copy');a.remove();done();}}

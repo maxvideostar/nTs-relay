@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  StreamHub 1.0 — server de redistribuire MPEG-TS (alternativă la Astra)
+#  StreamHub 1.1 — server de redistribuire MPEG-TS (alternativă la Astra)
 #  Păstrează PID-urile originale (PAT/PMT/video/audio/teletext/SI).
 #  Intrări: UDP/RTP multicast, HTTP-TS, HLS, SRT, RTMP
 #  Ieșiri:  HTTP-TS, HLS, UDP multicast  ·  Panou web + tokeni
@@ -83,7 +83,7 @@ import (
 )
 
 const (
-	version = "1.0.0"
+	version = "1.1.0"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -825,8 +825,9 @@ func (h *HLSSeg) Count() int {
 type UDPOut struct {
 	conn *net.UDPConn
 	dst  *net.UDPAddr
-	buf  []byte
-	errs atomic.Uint64
+	buf   []byte
+	errs  atomic.Uint64
+	count *atomic.Uint64
 }
 
 // udp://[iface@]239.1.1.1:1234?ttl=8
@@ -880,8 +881,10 @@ func NewUDPOut(s string) (*UDPOut, error) {
 func (o *UDPOut) WritePkt(p []byte) {
 	o.buf = append(o.buf, p...)
 	if len(o.buf) >= 7*tsSize {
-		if _, err := o.conn.WriteToUDP(o.buf, o.dst); err != nil {
+		if n, err := o.conn.WriteToUDP(o.buf, o.dst); err != nil {
 			o.errs.Add(1)
+		} else if o.count != nil {
+			o.count.Add(uint64(n))
 		}
 		o.buf = o.buf[:0]
 	}
@@ -1330,12 +1333,23 @@ type Subscriber struct {
 	addr  string
 	start time.Time
 	ready bool // a primit deja un keyframe
+	bytes atomic.Uint64
+	kbps  atomic.Int64
+	prev  uint64
 }
 
 type ClientInfo struct {
 	Addr string `json:"addr"`
 	Type string `json:"type"`
 	Secs int64  `json:"secs"`
+	Kbps int    `json:"kbps"`
+}
+
+type hlsClient struct {
+	seen  time.Time
+	bytes uint64
+	prev  uint64
+	kbps  int
 }
 
 type Channel struct {
@@ -1348,7 +1362,10 @@ type Channel struct {
 
 	subMu   sync.Mutex
 	subs    map[*Subscriber]struct{}
-	hlsSeen map[string]time.Time
+	hlsSeen map[string]*hlsClient
+	outBytes atomic.Uint64 // tot ce pleacă: HTTP + HLS + UDP
+	outPrev  uint64
+	outKbps  atomic.Int64
 
 	stMu      sync.Mutex
 	online    bool
@@ -1363,7 +1380,7 @@ type Channel struct {
 var errSwitchPrimary = errors.New("revenire pe sursa principală")
 
 func NewChannel(cfg ChannelConfig, hlsSeg, hlsWin int) *Channel {
-	c := &Channel{cfg: cfg, an: NewAnalyzer(), subs: map[*Subscriber]struct{}{}, hlsSeen: map[string]time.Time{}}
+	c := &Channel{cfg: cfg, an: NewAnalyzer(), subs: map[*Subscriber]struct{}{}, hlsSeen: map[string]*hlsClient{}}
 	if cfg.HLS {
 		c.hls = NewHLS(hlsSeg, hlsWin)
 	}
@@ -1374,6 +1391,7 @@ func NewChannel(cfg ChannelConfig, hlsSeg, hlsWin int) *Channel {
 			c.lastErr = err.Error()
 			log.Printf("[%s] %v", cfg.ID, err)
 		} else {
+			o.count = &c.outBytes
 			c.udp = o
 		}
 	}
@@ -1404,11 +1422,24 @@ func (c *Channel) ticker() {
 			return
 		case <-t.C:
 			c.an.Tick()
+			ob := c.outBytes.Load()
+			c.outKbps.Store(int64((ob - c.outPrev) * 8 / 1000))
+			c.outPrev = ob
 			c.subMu.Lock()
-			for ip, ts := range c.hlsSeen {
-				if time.Since(ts) > 30*time.Second {
+			for s := range c.subs {
+				b := s.bytes.Load()
+				s.kbps.Store(int64((b - s.prev) * 8 / 1000))
+				s.prev = b
+			}
+			for ip, h := range c.hlsSeen {
+				if time.Since(h.seen) > 30*time.Second {
 					delete(c.hlsSeen, ip)
+					continue
 				}
+				// HLS vine în rafale (segmente) → medie pe 5s
+				inst := int((h.bytes - h.prev) * 8 / 1000)
+				h.kbps = (h.kbps*4 + inst) / 5
+				h.prev = h.bytes
 			}
 			c.subMu.Unlock()
 		}
@@ -1602,6 +1633,18 @@ func (c *Channel) onData(chunk []byte) {
 	}
 }
 
+func (c *Channel) hlsTouch(ip string, n uint64) {
+	c.subMu.Lock()
+	h := c.hlsSeen[ip]
+	if h == nil {
+		h = &hlsClient{}
+		c.hlsSeen[ip] = h
+	}
+	h.seen = time.Now()
+	h.bytes += n
+	c.subMu.Unlock()
+}
+
 func (c *Channel) addSub(s *Subscriber) {
 	c.subMu.Lock()
 	c.subs[s] = struct{}{}
@@ -1624,6 +1667,7 @@ type ChanStatus struct {
 	Input     string       `json:"input"`
 	InputIdx  int          `json:"input_idx"`
 	Kbps      int          `json:"kbps"`
+	OutKbps   int          `json:"out_kbps"`
 	CC        uint64       `json:"cc"`
 	Scrambled bool         `json:"scrambled"`
 	Clients   []ClientInfo `json:"clients"`
@@ -1649,13 +1693,14 @@ func (c *Channel) Status() ChanStatus {
 		s.Kbps, s.Scrambled, s.Service, s.Provider, s.PIDs = a.Kbps, a.Scrambled, a.Service, a.Provider, a.PIDs
 	}
 	s.CC = a.CC
+	s.OutKbps = int(c.outKbps.Load())
 	c.subMu.Lock()
 	s.Clients = []ClientInfo{}
 	for sub := range c.subs {
-		s.Clients = append(s.Clients, ClientInfo{Addr: sub.addr, Type: "HTTP", Secs: int64(time.Since(sub.start).Seconds())})
+		s.Clients = append(s.Clients, ClientInfo{Addr: sub.addr, Type: "HTTP", Secs: int64(time.Since(sub.start).Seconds()), Kbps: int(sub.kbps.Load())})
 	}
-	for ip := range c.hlsSeen {
-		s.Clients = append(s.Clients, ClientInfo{Addr: ip, Type: "HLS"})
+	for ip, h := range c.hlsSeen {
+		s.Clients = append(s.Clients, ClientInfo{Addr: ip, Type: "HLS", Kbps: h.kbps})
 	}
 	c.subMu.Unlock()
 	if c.hls != nil {
@@ -1788,7 +1833,10 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if _, err := w.Write(b); err != nil {
+			n, err := w.Write(b)
+			sub.bytes.Add(uint64(n))
+			c.outBytes.Add(uint64(n))
+			if err != nil {
 				return
 			}
 		drain:
@@ -1798,7 +1846,10 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 					if !ok {
 						return
 					}
-					if _, err := w.Write(b); err != nil {
+					n, err := w.Write(b)
+					sub.bytes.Add(uint64(n))
+					c.outBytes.Add(uint64(n))
+					if err != nil {
 						return
 					}
 				default:
@@ -1834,9 +1885,7 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "stream indisponibil", 503)
 			return
 		}
-		c.subMu.Lock()
-		c.hlsSeen[clientIP(r)] = time.Now()
-		c.subMu.Unlock()
+		c.hlsTouch(clientIP(r), 0)
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Write(pl)
@@ -1855,7 +1904,9 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "video/mp2t")
 	w.Header().Set("Cache-Control", "max-age=60")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Write(data)
+	n, _ := w.Write(data)
+	c.outBytes.Add(uint64(n))
+	c.hlsTouch(clientIP(r), uint64(n))
 }
 
 func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
@@ -2099,7 +2150,7 @@ button.sm{padding:3px 9px;font-size:12px}
 main{padding:16px 20px 40px;max-width:1400px;margin:0 auto}
 .ch{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:8px;overflow:hidden}
 .ch.dis{opacity:.55}
-.row{display:grid;grid-template-columns:14px minmax(160px,1.3fr) minmax(180px,2fr) 110px 80px 70px auto;gap:14px;align-items:center;padding:11px 14px;cursor:pointer}
+.row{display:grid;grid-template-columns:14px minmax(160px,1.3fr) minmax(160px,2fr) 110px 110px 70px 70px auto;gap:14px;align-items:center;padding:11px 14px;cursor:pointer}
 .row:hover{background:var(--panel2)}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--mut)}
 .dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(46,194,126,.15)}
@@ -2141,7 +2192,7 @@ input:focus,textarea:focus{outline:none;border-color:var(--acc)}
 .hint code{font-family:var(--mono);color:#aab4c3}
 .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 .msg{color:var(--bad);font-size:13px;margin-top:10px}
-@media(max-width:900px){header{padding:10px 14px;gap:10px}.brand{flex:1}#sum{order:3;flex-basis:100%;gap:6px 14px;font-size:12px}main{padding:12px 12px 32px}.row{grid-template-columns:12px 1fr 90px;row-gap:6px}.in,.row .num:nth-child(5),.row .num:nth-child(6){display:none}.ops{grid-column:1/-1}.cols{grid-template-columns:1fr}}
+@media(max-width:900px){header{padding:10px 14px;gap:10px}.brand{flex:1}#sum{order:3;flex-basis:100%;gap:6px 14px;font-size:12px}main{padding:12px 12px 32px}.row{grid-template-columns:12px 1fr 90px;row-gap:6px}.in,.row .num:nth-child(5),.row .num:nth-child(6),.row .num:nth-child(7){display:none}.ops{grid-column:1/-1}.cols{grid-template-columns:1fr}}
 </style></head><body>
 <header>
   <div class="brand">Stream<span>Hub</span></div>
@@ -2165,9 +2216,9 @@ function outs(c){var b=location.origin,q=(!c.public&&tok())?'?token='+encodeURIC
   if(c.http)r.push(['HTTP',b+'/play/'+c.id+q]);if(c.hls)r.push(['HLS',b+'/hls/'+c.id+'/index.m3u8'+q]);if(c.udp)r.push(['UDP',c.udp]);return r;}
 function tog(id){opened[id]=!opened[id];render();}
 function render(){
-  if(!st)return;var L=document.getElementById('list'),h='',on=0,en=0,bw=0,cl=0,cc=0;
+  if(!st)return;var L=document.getElementById('list'),h='',on=0,en=0,bw=0,ob=0,cl=0,cc=0;
   st.channels.forEach(function(c){
-    if(c.enabled)en++;if(c.online)on++;bw+=c.kbps||0;cl+=c.clients.length;cc+=c.cc||0;
+    if(c.enabled)en++;if(c.online)on++;bw+=c.kbps||0;ob+=c.out_kbps||0;cl+=c.clients.length;cc+=c.cc||0;
     var cls=c.enabled?(c.online?'ok':'bad'):'',tags='';
     if(c.input_idx>0&&c.online)tags+='<span class="tag w">backup #'+(c.input_idx+1)+'</span>';
     if(c.scrambled)tags+='<span class="tag r">criptat</span>';
@@ -2177,6 +2228,7 @@ function render(){
     h+='<div class="nm"><b>'+esc(c.name||c.id)+tags+'</b><small>'+esc(c.id)+(c.service?' · '+esc(c.service):'')+'</small></div>';
     h+='<div class="in"><small>Intrare'+(c.inputs&&c.inputs.length>1?' ('+(c.input_idx+1)+'/'+c.inputs.length+')':'')+'</small><div>'+esc(c.input||(c.inputs&&c.inputs[0])||'—')+'</div></div>';
     h+='<div class="num">'+(c.online?rate(c.kbps):'<span class="bad-t">'+(c.enabled?'offline':'—')+'</span>')+'<small>'+(c.online?'activ '+dur(c.uptime):'')+'</small></div>';
+    h+='<div class="num">'+(c.online||c.out_kbps?rate(c.out_kbps||0):'—')+'<small>ieșire</small></div>';
     h+='<div class="num'+(c.cc?' warn-t':'')+'">'+(c.cc||0)+'<small>erori CC</small></div>';
     h+='<div class="num">'+c.clients.length+'<small>clienți</small></div>';
     h+='<div class="ops" onclick="event.stopPropagation()"><button class="sm" onclick="editCh(\''+esc(c.id)+'\')">Editează</button><button class="sm" onclick="restartCh(\''+esc(c.id)+'\')">Repornește</button><button class="sm dng" onclick="delCh(\''+esc(c.id)+'\')">Șterge</button></div></div>';
@@ -2188,13 +2240,13 @@ function render(){
       c.pids.forEach(function(p){h+='<tr><td>'+hex(p.pid)+' <span style="color:var(--mut)">'+p.pid+'</span></td><td class="t k-'+p.kind+'">'+esc(p.type)+(p.scrambled?' <span class="tag r">criptat</span>':'')+'</td><td>'+esc(p.lang||'')+'</td><td style="text-align:right">'+rate(p.kbps)+'</td><td style="text-align:right"'+(p.cc?' class="warn-t"':'')+'>'+p.cc+'</td></tr>';});
       h+='</table>';}else h+='<div class="hint">Fără date.</div>';
     h+='</div><div><h4>Clienți</h4>';
-    if(c.clients.length){h+='<table>';c.clients.forEach(function(x){h+='<tr><td>'+esc(x.addr)+'</td><td class="t">'+x.type+'</td><td style="text-align:right">'+(x.type==='HTTP'?dur(x.secs):'')+'</td></tr>';});h+='</table>';}else h+='<div class="hint">Niciun client conectat.</div>';
+    if(c.clients.length){h+='<table>';c.clients.forEach(function(x){h+='<tr><td>'+esc(x.addr)+'</td><td class="t">'+x.type+'</td><td style="text-align:right">'+rate(x.kbps||0)+'</td><td style="text-align:right">'+(x.type==='HTTP'?dur(x.secs):'')+'</td></tr>';});h+='</table>';}else h+='<div class="hint">Niciun client conectat.</div>';
     if(c.hls)h+='<div class="hint" style="margin-top:10px">Segmente HLS în memorie: '+c.hls_segs+'</div>';
     if(c.switches)h+='<div class="hint">Comutări sursă: '+c.switches+'</div>';
     h+='</div></div></div></div>';
   });
   L.innerHTML=h||'<div class="empty">Niciun canal. Apasă <b>+ Canal</b> ca să adaugi primul.</div>';
-  document.getElementById('sum').innerHTML='<span>Online <b>'+on+'/'+en+'</b></span><span>Trafic intrare <b>'+rate(bw)+'</b></span><span>Clienți <b>'+cl+'</b></span><span>Erori CC <b>'+cc+'</b></span><span>Uptime <b>'+dur(st.uptime)+'</b></span>';
+  document.getElementById('sum').innerHTML='<span>Online <b>'+on+'/'+en+'</b></span><span>Intrare <b>'+rate(bw)+'</b></span><span>Ieșire <b>'+rate(ob)+'</b></span><span>Clienți <b>'+cl+'</b></span><span>Erori CC <b>'+cc+'</b></span><span>Uptime <b>'+dur(st.uptime)+'</b></span>';
 }
 function cp(b,t){var done=function(){b.textContent='Copiat';setTimeout(function(){b.textContent='Copiază';},1200);};
   if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(t).then(done);else{var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();document.execCommand('copy');a.remove();done();}}

@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	version = "1.0.0"
+	version = "1.1.0"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -776,8 +776,9 @@ func (h *HLSSeg) Count() int {
 type UDPOut struct {
 	conn *net.UDPConn
 	dst  *net.UDPAddr
-	buf  []byte
-	errs atomic.Uint64
+	buf   []byte
+	errs  atomic.Uint64
+	count *atomic.Uint64
 }
 
 // udp://[iface@]239.1.1.1:1234?ttl=8
@@ -831,8 +832,10 @@ func NewUDPOut(s string) (*UDPOut, error) {
 func (o *UDPOut) WritePkt(p []byte) {
 	o.buf = append(o.buf, p...)
 	if len(o.buf) >= 7*tsSize {
-		if _, err := o.conn.WriteToUDP(o.buf, o.dst); err != nil {
+		if n, err := o.conn.WriteToUDP(o.buf, o.dst); err != nil {
 			o.errs.Add(1)
+		} else if o.count != nil {
+			o.count.Add(uint64(n))
 		}
 		o.buf = o.buf[:0]
 	}
@@ -1281,12 +1284,23 @@ type Subscriber struct {
 	addr  string
 	start time.Time
 	ready bool // a primit deja un keyframe
+	bytes atomic.Uint64
+	kbps  atomic.Int64
+	prev  uint64
 }
 
 type ClientInfo struct {
 	Addr string `json:"addr"`
 	Type string `json:"type"`
 	Secs int64  `json:"secs"`
+	Kbps int    `json:"kbps"`
+}
+
+type hlsClient struct {
+	seen  time.Time
+	bytes uint64
+	prev  uint64
+	kbps  int
 }
 
 type Channel struct {
@@ -1299,7 +1313,10 @@ type Channel struct {
 
 	subMu   sync.Mutex
 	subs    map[*Subscriber]struct{}
-	hlsSeen map[string]time.Time
+	hlsSeen map[string]*hlsClient
+	outBytes atomic.Uint64 // tot ce pleacă: HTTP + HLS + UDP
+	outPrev  uint64
+	outKbps  atomic.Int64
 
 	stMu      sync.Mutex
 	online    bool
@@ -1314,7 +1331,7 @@ type Channel struct {
 var errSwitchPrimary = errors.New("revenire pe sursa principală")
 
 func NewChannel(cfg ChannelConfig, hlsSeg, hlsWin int) *Channel {
-	c := &Channel{cfg: cfg, an: NewAnalyzer(), subs: map[*Subscriber]struct{}{}, hlsSeen: map[string]time.Time{}}
+	c := &Channel{cfg: cfg, an: NewAnalyzer(), subs: map[*Subscriber]struct{}{}, hlsSeen: map[string]*hlsClient{}}
 	if cfg.HLS {
 		c.hls = NewHLS(hlsSeg, hlsWin)
 	}
@@ -1325,6 +1342,7 @@ func NewChannel(cfg ChannelConfig, hlsSeg, hlsWin int) *Channel {
 			c.lastErr = err.Error()
 			log.Printf("[%s] %v", cfg.ID, err)
 		} else {
+			o.count = &c.outBytes
 			c.udp = o
 		}
 	}
@@ -1355,11 +1373,24 @@ func (c *Channel) ticker() {
 			return
 		case <-t.C:
 			c.an.Tick()
+			ob := c.outBytes.Load()
+			c.outKbps.Store(int64((ob - c.outPrev) * 8 / 1000))
+			c.outPrev = ob
 			c.subMu.Lock()
-			for ip, ts := range c.hlsSeen {
-				if time.Since(ts) > 30*time.Second {
+			for s := range c.subs {
+				b := s.bytes.Load()
+				s.kbps.Store(int64((b - s.prev) * 8 / 1000))
+				s.prev = b
+			}
+			for ip, h := range c.hlsSeen {
+				if time.Since(h.seen) > 30*time.Second {
 					delete(c.hlsSeen, ip)
+					continue
 				}
+				// HLS vine în rafale (segmente) → medie pe 5s
+				inst := int((h.bytes - h.prev) * 8 / 1000)
+				h.kbps = (h.kbps*4 + inst) / 5
+				h.prev = h.bytes
 			}
 			c.subMu.Unlock()
 		}
@@ -1553,6 +1584,18 @@ func (c *Channel) onData(chunk []byte) {
 	}
 }
 
+func (c *Channel) hlsTouch(ip string, n uint64) {
+	c.subMu.Lock()
+	h := c.hlsSeen[ip]
+	if h == nil {
+		h = &hlsClient{}
+		c.hlsSeen[ip] = h
+	}
+	h.seen = time.Now()
+	h.bytes += n
+	c.subMu.Unlock()
+}
+
 func (c *Channel) addSub(s *Subscriber) {
 	c.subMu.Lock()
 	c.subs[s] = struct{}{}
@@ -1575,6 +1618,7 @@ type ChanStatus struct {
 	Input     string       `json:"input"`
 	InputIdx  int          `json:"input_idx"`
 	Kbps      int          `json:"kbps"`
+	OutKbps   int          `json:"out_kbps"`
 	CC        uint64       `json:"cc"`
 	Scrambled bool         `json:"scrambled"`
 	Clients   []ClientInfo `json:"clients"`
@@ -1600,13 +1644,14 @@ func (c *Channel) Status() ChanStatus {
 		s.Kbps, s.Scrambled, s.Service, s.Provider, s.PIDs = a.Kbps, a.Scrambled, a.Service, a.Provider, a.PIDs
 	}
 	s.CC = a.CC
+	s.OutKbps = int(c.outKbps.Load())
 	c.subMu.Lock()
 	s.Clients = []ClientInfo{}
 	for sub := range c.subs {
-		s.Clients = append(s.Clients, ClientInfo{Addr: sub.addr, Type: "HTTP", Secs: int64(time.Since(sub.start).Seconds())})
+		s.Clients = append(s.Clients, ClientInfo{Addr: sub.addr, Type: "HTTP", Secs: int64(time.Since(sub.start).Seconds()), Kbps: int(sub.kbps.Load())})
 	}
-	for ip := range c.hlsSeen {
-		s.Clients = append(s.Clients, ClientInfo{Addr: ip, Type: "HLS"})
+	for ip, h := range c.hlsSeen {
+		s.Clients = append(s.Clients, ClientInfo{Addr: ip, Type: "HLS", Kbps: h.kbps})
 	}
 	c.subMu.Unlock()
 	if c.hls != nil {
@@ -1739,7 +1784,10 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if _, err := w.Write(b); err != nil {
+			n, err := w.Write(b)
+			sub.bytes.Add(uint64(n))
+			c.outBytes.Add(uint64(n))
+			if err != nil {
 				return
 			}
 		drain:
@@ -1749,7 +1797,10 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 					if !ok {
 						return
 					}
-					if _, err := w.Write(b); err != nil {
+					n, err := w.Write(b)
+					sub.bytes.Add(uint64(n))
+					c.outBytes.Add(uint64(n))
+					if err != nil {
 						return
 					}
 				default:
@@ -1785,9 +1836,7 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "stream indisponibil", 503)
 			return
 		}
-		c.subMu.Lock()
-		c.hlsSeen[clientIP(r)] = time.Now()
-		c.subMu.Unlock()
+		c.hlsTouch(clientIP(r), 0)
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Write(pl)
@@ -1806,7 +1855,9 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "video/mp2t")
 	w.Header().Set("Cache-Control", "max-age=60")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Write(data)
+	n, _ := w.Write(data)
+	c.outBytes.Add(uint64(n))
+	c.hlsTouch(clientIP(r), uint64(n))
 }
 
 func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
