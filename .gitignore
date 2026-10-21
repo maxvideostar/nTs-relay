@@ -1,3 +1,4 @@
 streamhub
 *.ts
 config.json
+dist/

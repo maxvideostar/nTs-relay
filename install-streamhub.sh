@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  StreamHub 1.2 — server de redistribuire MPEG-TS (alternativă la Astra)
+#  StreamHub 1.3 — server de redistribuire MPEG-TS (alternativă la Astra)
 #  Păstrează PID-urile originale (PAT/PMT/video/audio/teletext/SI).
 #  Intrări: UDP/RTP multicast, HTTP-TS, HLS, SRT, RTMP
 #  Ieșiri:  HTTP-TS, HLS, UDP multicast  ·  Panou web + tokeni
@@ -77,13 +77,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode/utf8"
 )
 
 const (
-	version = "1.2.1"
+	version = "1.3.0"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -823,8 +822,8 @@ func (h *HLSSeg) Count() int {
 // ============================== UDP OUTPUT ==============================
 
 type UDPOut struct {
-	conn *net.UDPConn
-	dst  *net.UDPAddr
+	conn  *net.UDPConn
+	dst   *net.UDPAddr
 	buf   []byte
 	errs  atomic.Uint64
 	count *atomic.Uint64
@@ -867,14 +866,7 @@ func NewUDPOut(s string) (*UDPOut, error) {
 		return nil, err
 	}
 	rc, _ := conn.SyscallConn()
-	rc.Control(func(fd uintptr) {
-		syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_MULTICAST_TTL, ttl)
-		syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
-		syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4<<20)
-		if iface != "" {
-			syscall.SetsockoptInet4Addr(int(fd), syscall.IPPROTO_IP, syscall.IP_MULTICAST_IF, ifIP)
-		}
-	})
+	rc.Control(func(fd uintptr) { setUDPSockOpts(fd, ttl, iface != "", ifIP) })
 	return &UDPOut{conn: conn, dst: dst, buf: make([]byte, 0, 7*tsSize)}, nil
 }
 
@@ -1263,10 +1255,10 @@ func (t *tailBuf) last() string {
 
 func readExec(ctx context.Context, name string, args []string, out func([]byte)) error {
 	if _, err := exec.LookPath(name); err != nil {
-		return fmt.Errorf("%s nu e instalat", name)
+		return fmt.Errorf("%s nu a fost găsit — instalează-l sau pune-l în folderul StreamHub", name)
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	cmd.SysProcAttr = childProcAttr()
 	cmd.WaitDelay = 3 * time.Second
 	tb := &tailBuf{}
 	cmd.Stderr = tb
@@ -1365,9 +1357,9 @@ type Channel struct {
 	hls    *HLSSeg
 	udp    *UDPOut
 
-	subMu   sync.Mutex
-	subs    map[*Subscriber]struct{}
-	hlsSeen map[string]*hlsClient
+	subMu    sync.Mutex
+	subs     map[*Subscriber]struct{}
+	hlsSeen  map[string]*hlsClient
 	outBytes atomic.Uint64 // tot ce pleacă: HTTP + HLS + UDP
 	outPrev  uint64
 	outKbps  atomic.Int64
@@ -2117,12 +2109,23 @@ func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	cfgPath := flag.String("config", "/etc/streamhub/config.json", "fișierul de configurare")
+	cfgPath := flag.String("config", defaultConfigPath(), "fișierul de configurare")
+	install := flag.Bool("install", false, "Windows: pornire automată cu sistemul (rulează ca serviciu)")
+	uninstall := flag.Bool("uninstall", false, "Windows: elimină pornirea automată")
 	flag.Parse()
 	log.SetFlags(log.LstdFlags)
+	if *install || *uninstall {
+		if err := platformService(*install, *cfgPath); err != nil {
+			fatal(err)
+		}
+		return
+	}
+	platformInit()
+	_, statErr := os.Stat(*cfgPath)
+	firstRun := errors.Is(statErr, os.ErrNotExist)
 	s, err := NewServer(*cfgPath)
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /play/{id}", s.handlePlay)
@@ -2138,8 +2141,16 @@ func main() {
 		w.Write([]byte(uiHTML))
 	}))
 	log.Printf("StreamHub %s ascultă pe %s (%d canale)", version, s.cfg.Listen, len(s.cfg.Channels))
-	srv := &http.Server{Addr: s.cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	log.Fatal(srv.ListenAndServe())
+	ln, err := net.Listen("tcp", s.cfg.Listen)
+	if err != nil {
+		fatal(fmt.Errorf("nu pot asculta pe %s: %v (portul e ocupat? schimbă \"listen\" în %s)", s.cfg.Listen, err, *cfgPath))
+	}
+	if firstRun {
+		port := s.cfg.Listen[strings.LastIndex(s.cfg.Listen, ":")+1:]
+		openBrowser("http://127.0.0.1:" + port + "/")
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	fatal(srv.Serve(ln))
 }
 STREAMHUB_GO_EOF
 cat > "$BUILD/ui.go" <<'STREAMHUB_UI_EOF'
@@ -2328,6 +2339,42 @@ loadCfg().then(tick);setInterval(tick,2000);
 </script>
 </body></html>`
 STREAMHUB_UI_EOF
+cat > "$BUILD/sys_linux.go" <<'STREAMHUB_SYS_EOF'
+//go:build linux
+
+package main
+
+import (
+	"errors"
+	"log"
+	"syscall"
+)
+
+func defaultConfigPath() string { return "/etc/streamhub/config.json" }
+
+func setUDPSockOpts(fd uintptr, ttl int, setIf bool, ifIP [4]byte) {
+	syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_MULTICAST_TTL, ttl)
+	syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
+	syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4<<20)
+	if setIf {
+		syscall.SetsockoptInet4Addr(int(fd), syscall.IPPROTO_IP, syscall.IP_MULTICAST_IF, ifIP)
+	}
+}
+
+// procesele ffmpeg/srt-live-transmit mor odată cu StreamHub
+func childProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+}
+
+func platformInit()      {}
+func openBrowser(string) {}
+
+func platformService(bool, string) error {
+	return errors.New("pe Linux folosește install-streamhub.sh (serviciu systemd)")
+}
+
+func fatal(err error) { log.Fatal(err) }
+STREAMHUB_SYS_EOF
 (cd "$BUILD" && GOTOOLCHAIN=local CGO_ENABLED=0 GOCACHE="$BUILD/.cache" $GO build -trimpath -ldflags "-s -w" -o streamhub .)
 install -m 755 "$BUILD/streamhub" "$BIN.new" && mv -f "$BIN.new" "$BIN"
 

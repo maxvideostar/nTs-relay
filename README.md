@@ -14,6 +14,16 @@ Scriptul instalează Go (dacă lipsește), ffmpeg și srt-tools, compilează bin
 creează `/etc/streamhub/config.json` (parolă admin și token generate automat) și serviciul systemd `streamhub`.
 Rulat din nou, actualizează binarul și păstrează config-ul.
 
+## Windows
+
+Descarcă `streamhub-<versiune>-windows-x64.zip` din [Releases](https://github.com/maxvideostar/nTs-relay/releases),
+pune `streamhub.exe` într-un folder fix (ex. `C:\StreamHub`) și dă dublu-click: creează `config.json` lângă exe
+și deschide panoul în browser.
+
+- `streamhub.exe -install` — pornire automată cu Windows, în fundal (task programat ca SYSTEM, repornire automată) + regulă de firewall
+- `streamhub.exe -uninstall` — oprește și elimină pornirea automată
+- jurnal în `streamhub.log`; pentru SRT/RTMP pune `ffmpeg.exe` lângă `streamhub.exe`
+
 ## Intrări
 
 | Format | Exemplu | PID-uri originale |
@@ -54,8 +64,7 @@ clienți conectați, adăugare/editare/ștergere canale, tokeni, setări HLS.
 ## Compilare manuală
 
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o streamhub .
-./streamhub -config config.json
+./build.sh   # dist/: streamhub-linux-amd64, streamhub-linux-arm64, streamhub.exe, zip Windows
 ```
 
 Exemplu de configurare: [`config.example.json`](config.example.json). Loguri: `journalctl -u streamhub -f`.
