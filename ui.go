@@ -48,6 +48,9 @@ td.t{font-family:inherit}
 .k-video{color:#7cc4ff}.k-audio{color:#b69cff}.k-psi{color:var(--mut)}.k-teletext,.k-subtitle{color:#7fd6b6}
 .cols{display:grid;grid-template-columns:2fr 1fr;gap:16px}
 h4{margin:0 0 8px;font-size:12px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+.tabs{display:flex;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:3px}.tabs button{border:0;background:none;padding:5px 12px;color:var(--mut)}.tabs button.on{background:var(--panel);color:var(--text);box-shadow:0 0 0 1px var(--line)}
+.ctab{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:auto}.ctab table{min-width:760px}.ctab td,.ctab th{padding:8px 12px}.ctab tr:hover td{background:var(--panel2)}.ua{color:var(--mut);font-family:inherit;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fil{display:flex;gap:10px;align-items:center;margin-bottom:10px}.fil input{max-width:280px}
 .empty{text-align:center;color:var(--mut);padding:60px 20px}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;z-index:20;overflow:auto}
 .modal.hidden{display:none}
@@ -63,11 +66,12 @@ input:focus,textarea:focus{outline:none;border-color:var(--acc)}
 .hint code{font-family:var(--mono);color:#aab4c3}
 .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 .msg{color:var(--bad);font-size:13px;margin-top:10px}
-@media(max-width:900px){header{padding:10px 14px;gap:10px}.brand{flex:1}#sum{order:3;flex-basis:100%;gap:6px 14px;font-size:12px}main{padding:12px 12px 32px}.row{grid-template-columns:12px 1fr 90px;row-gap:6px}.in,.row .num:nth-child(5),.row .num:nth-child(6),.row .num:nth-child(7){display:none}.ops{grid-column:1/-1}.cols{grid-template-columns:1fr}}
+@media(max-width:900px){header{padding:10px 14px;gap:10px}.brand{flex:1}.tabs{order:4}#sum{order:3;flex-basis:100%;gap:6px 14px;font-size:12px}main{padding:12px 12px 32px}.row{grid-template-columns:12px 1fr 90px;row-gap:6px}.in,.row .num:nth-child(5),.row .num:nth-child(6),.row .num:nth-child(7){display:none}.ops{grid-column:1/-1}.cols{grid-template-columns:1fr}}
 </style></head><body>
 <header>
   <div class="brand">Stream<span>Hub</span></div>
   <div id="sum"></div>
+  <div class="tabs"><button id="t_ch" class="on" onclick="setView('ch')">Canale</button><button id="t_cl" onclick="setView('cl')">Clienți</button></div>
   <button onclick="openSettings()">Setări</button>
   <button class="pri" onclick="editCh(null)">+ Canal</button>
 </header>
@@ -85,6 +89,23 @@ function hex(p){var h=p.toString(16).toUpperCase();while(h.length<4)h='0'+h;retu
 function tok(){return cfg.tokens&&cfg.tokens.length?cfg.tokens[0]:'';}
 function outs(c){var b=location.origin,q=(!c.public&&tok())?'?token='+encodeURIComponent(tok()):'',r=[];
   if(c.http)r.push(['HTTP',b+'/play/'+c.id+q]);if(c.hls)r.push(['HLS',b+'/hls/'+c.id+'/index.m3u8'+q]);if(c.udp)r.push(['UDP',c.udp]);return r;}
+var view='ch',filt='';
+function setView(v){view=v;document.getElementById('t_ch').className=v==='ch'?'on':'';document.getElementById('t_cl').className=v==='cl'?'on':'';render();}
+function size(b){b=b||0;return b>=1e9?(b/1e9).toFixed(2)+' GB':b>=1e6?(b/1e6).toFixed(1)+' MB':(b/1e3).toFixed(0)+' KB';}
+function player(ua){ua=ua||'';var m=[[/VLC|LibVLC/i,'VLC'],[/TiviMate/i,'TiviMate'],[/Kodi/i,'Kodi'],[/Smarters/i,'IPTV Smarters'],[/OTT ?Navigator/i,'OTT Navigator'],[/Perfect ?Player/i,'Perfect Player'],[/ExoPlayer|ExoPlayerLib/i,'ExoPlayer (Android)'],[/Lavf|ffmpeg|ffprobe/i,'FFmpeg'],[/Astra/i,'Astra'],[/StreamHub/i,'StreamHub'],[/mpv/i,'mpv'],[/Tizen|SMART-TV|SmartTV/i,'Samsung TV'],[/Web0S|webOS|NetCast/i,'LG TV'],[/AppleCoreMedia|iPhone|iPad/i,'iOS'],[/Edg\//i,'Edge'],[/Chrome/i,'Chrome'],[/Firefox/i,'Firefox'],[/Safari/i,'Safari'],[/curl/i,'curl'],[/wget/i,'wget']];
+  for(var i=0;i<m.length;i++)if(m[i][0].test(ua))return m[i][1];return ua?ua.split(/[\/ ]/)[0]:'—';}
+function renderClients(){
+  var rows=[];st.channels.forEach(function(c){c.clients.forEach(function(x){rows.push({c:c,x:x});});});
+  var f=filt.toLowerCase();if(f)rows=rows.filter(function(r){return (r.x.addr+' '+(r.c.name||'')+' '+r.c.id+' '+player(r.x.ua)+' '+r.x.type).toLowerCase().indexOf(f)>=0;});
+  rows.sort(function(a,b){return b.x.kbps-a.x.kbps;});
+  var ips={};rows.forEach(function(r){ips[r.x.addr]=1;});
+  var h='<div class="fil"><input type="text" id="cf" placeholder="Caută IP, canal, player…" value="'+esc(filt)+'" oninput="filt=this.value;render();var e=document.getElementById(\'cf\');e.focus();e.setSelectionRange(e.value.length,e.value.length);"><span class="hint">'+rows.length+' conexiuni · '+Object.keys(ips).length+' IP-uri unice</span></div>';
+  if(!rows.length)return h+'<div class="empty">Niciun client conectat.</div>';
+  h+='<div class="ctab"><table><tr><th>IP client</th><th>Canal</th><th>Format</th><th>Player</th><th style="text-align:right">Viteză</th><th style="text-align:right">Transferat</th><th style="text-align:right">Conectat de</th></tr>';
+  rows.forEach(function(r){var x=r.x,c=r.c;
+    h+='<tr><td>'+esc(x.addr)+'</td><td class="t"><b>'+esc(c.name||c.id)+'</b> <span style="color:var(--mut)">'+esc(c.id)+'</span></td><td class="t">'+x.type+'</td><td class="ua" title="'+esc(x.ua)+'">'+esc(player(x.ua))+'</td><td style="text-align:right">'+rate(x.kbps||0)+'</td><td style="text-align:right">'+size(x.bytes)+'</td><td style="text-align:right">'+dur(x.secs)+'</td></tr>';});
+  return h+'</table></div>';
+}
 function tog(id){opened[id]=!opened[id];render();}
 function render(){
   if(!st)return;var L=document.getElementById('list'),h='',on=0,en=0,bw=0,ob=0,cl=0,cc=0;
@@ -111,12 +132,14 @@ function render(){
       c.pids.forEach(function(p){h+='<tr><td>'+hex(p.pid)+' <span style="color:var(--mut)">'+p.pid+'</span></td><td class="t k-'+p.kind+'">'+esc(p.type)+(p.scrambled?' <span class="tag r">criptat</span>':'')+'</td><td>'+esc(p.lang||'')+'</td><td style="text-align:right">'+rate(p.kbps)+'</td><td style="text-align:right"'+(p.cc?' class="warn-t"':'')+'>'+p.cc+'</td></tr>';});
       h+='</table>';}else h+='<div class="hint">Fără date.</div>';
     h+='</div><div><h4>Clienți</h4>';
-    if(c.clients.length){h+='<table>';c.clients.forEach(function(x){h+='<tr><td>'+esc(x.addr)+'</td><td class="t">'+x.type+'</td><td style="text-align:right">'+rate(x.kbps||0)+'</td><td style="text-align:right">'+(x.type==='HTTP'?dur(x.secs):'')+'</td></tr>';});h+='</table>';}else h+='<div class="hint">Niciun client conectat.</div>';
+    if(c.clients.length){h+='<table>';c.clients.forEach(function(x){h+='<tr><td>'+esc(x.addr)+'</td><td class="t">'+x.type+'</td><td class="ua" title="'+esc(x.ua)+'">'+esc(player(x.ua))+'</td><td style="text-align:right">'+rate(x.kbps||0)+'</td><td style="text-align:right">'+dur(x.secs)+'</td></tr>';});h+='</table>';}else h+='<div class="hint">Niciun client conectat.</div>';
     if(c.hls)h+='<div class="hint" style="margin-top:10px">Segmente HLS în memorie: '+c.hls_segs+'</div>';
     if(c.switches)h+='<div class="hint">Comutări sursă: '+c.switches+'</div>';
     h+='</div></div></div></div>';
   });
+  if(view==='cl')h=renderClients();
   L.innerHTML=h||'<div class="empty">Niciun canal. Apasă <b>+ Canal</b> ca să adaugi primul.</div>';
+  document.getElementById('t_cl').textContent='Clienți ('+cl+')';
   document.getElementById('sum').innerHTML='<span>Online <b>'+on+'/'+en+'</b></span><span>Intrare <b>'+rate(bw)+'</b></span><span>Ieșire <b>'+rate(ob)+'</b></span><span>Clienți <b>'+cl+'</b></span><span>Erori CC <b>'+cc+'</b></span><span>Uptime <b>'+dur(st.uptime)+'</b></span>';
 }
 function cp(b,t){var done=function(){b.textContent='Copiat';setTimeout(function(){b.textContent='Copiază';},1200);};

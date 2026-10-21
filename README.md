@@ -29,6 +29,7 @@ Mai multe intrări pe un canal = backup automat: comutare în ~5s, revenire pe s
 
 ## Ieșiri
 
+- **Clienți:** tabul „Clienți” din panou arată IP, canal, format, player, viteză, transferat și durata fiecărei conexiuni
 - **HTTP-TS:** `http://IP:8000/play/<id>?token=<token>` — clienții noi pornesc pe keyframe, cu PAT/PMT în față
 - **HLS:** `http://IP:8000/hls/<id>/index.m3u8?token=<token>` — segmente în memorie, tăiate pe keyframe
 - **UDP/multicast:** `udp://[iface@]239.10.0.1:1234?ttl=8`

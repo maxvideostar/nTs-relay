@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  StreamHub 1.1 — server de redistribuire MPEG-TS (alternativă la Astra)
+#  StreamHub 1.2 — server de redistribuire MPEG-TS (alternativă la Astra)
 #  Păstrează PID-urile originale (PAT/PMT/video/audio/teletext/SI).
 #  Intrări: UDP/RTP multicast, HTTP-TS, HLS, SRT, RTMP
 #  Ieșiri:  HTTP-TS, HLS, UDP multicast  ·  Panou web + tokeni
@@ -83,7 +83,7 @@ import (
 )
 
 const (
-	version = "1.1.0"
+	version = "1.2.0"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -1333,19 +1333,24 @@ type Subscriber struct {
 	addr  string
 	start time.Time
 	ready bool // a primit deja un keyframe
+	ua    string
 	bytes atomic.Uint64
 	kbps  atomic.Int64
 	prev  uint64
 }
 
 type ClientInfo struct {
-	Addr string `json:"addr"`
-	Type string `json:"type"`
-	Secs int64  `json:"secs"`
-	Kbps int    `json:"kbps"`
+	Addr  string `json:"addr"`
+	Type  string `json:"type"`
+	Secs  int64  `json:"secs"`
+	Kbps  int    `json:"kbps"`
+	UA    string `json:"ua"`
+	Bytes uint64 `json:"bytes"`
 }
 
 type hlsClient struct {
+	first time.Time
+	ua    string
 	seen  time.Time
 	bytes uint64
 	prev  uint64
@@ -1633,12 +1638,13 @@ func (c *Channel) onData(chunk []byte) {
 	}
 }
 
-func (c *Channel) hlsTouch(ip string, n uint64) {
+func (c *Channel) hlsTouch(ip, ua string, n uint64) {
 	c.subMu.Lock()
-	h := c.hlsSeen[ip]
+	key := ip + "|" + ua // mai mulți playeri în spatele aceluiași IP
+	h := c.hlsSeen[key]
 	if h == nil {
-		h = &hlsClient{}
-		c.hlsSeen[ip] = h
+		h = &hlsClient{first: time.Now(), ua: ua}
+		c.hlsSeen[key] = h
 	}
 	h.seen = time.Now()
 	h.bytes += n
@@ -1697,11 +1703,12 @@ func (c *Channel) Status() ChanStatus {
 	c.subMu.Lock()
 	s.Clients = []ClientInfo{}
 	for sub := range c.subs {
-		s.Clients = append(s.Clients, ClientInfo{Addr: sub.addr, Type: "HTTP", Secs: int64(time.Since(sub.start).Seconds()), Kbps: int(sub.kbps.Load())})
+		s.Clients = append(s.Clients, ClientInfo{Addr: sub.addr, Type: "HTTP", Secs: int64(time.Since(sub.start).Seconds()), Kbps: int(sub.kbps.Load()), UA: sub.ua, Bytes: sub.bytes.Load()})
 	}
-	for ip, h := range c.hlsSeen {
-		s.Clients = append(s.Clients, ClientInfo{Addr: ip, Type: "HLS", Kbps: h.kbps})
+	for key, h := range c.hlsSeen {
+		s.Clients = append(s.Clients, ClientInfo{Addr: strings.SplitN(key, "|", 2)[0], Type: "HLS", Secs: int64(time.Since(h.first).Seconds()), Kbps: h.kbps, UA: h.ua, Bytes: h.bytes})
 	}
+	sort.Slice(s.Clients, func(i, j int) bool { return s.Clients[i].Secs > s.Clients[j].Secs })
 	c.subMu.Unlock()
 	if c.hls != nil {
 		s.HLSSegs = c.hls.Count()
@@ -1772,14 +1779,18 @@ func (s *Server) channel(id string) *Channel {
 	return s.channels[id]
 }
 
+// clientIP: IP-ul real al clientului. Headerele de proxy sunt crezute doar
+// când cererea vine de pe aceeași mașină (nginx local), altfel ar putea fi falsificate.
 func clientIP(r *http.Request) string {
-	if x := r.Header.Get("X-Real-IP"); x != "" {
-		return x
-	}
-	if x := r.Header.Get("X-Forwarded-For"); x != "" {
-		return strings.TrimSpace(strings.Split(x, ",")[0])
-	}
 	h, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+		if x := r.Header.Get("X-Real-IP"); x != "" {
+			return strings.TrimSpace(x)
+		}
+		if x := r.Header.Get("X-Forwarded-For"); x != "" {
+			return strings.TrimSpace(strings.Split(x, ",")[0])
+		}
+	}
 	return h
 }
 
@@ -1813,7 +1824,7 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "acces interzis", 403)
 		return
 	}
-	sub := &Subscriber{ch: make(chan []byte, 4096), addr: clientIP(r), start: time.Now()}
+	sub := &Subscriber{ch: make(chan []byte, 4096), addr: clientIP(r), start: time.Now(), ua: r.UserAgent()}
 	c.addSub(sub)
 	defer c.removeSub(sub)
 	h := w.Header()
@@ -1885,7 +1896,7 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "stream indisponibil", 503)
 			return
 		}
-		c.hlsTouch(clientIP(r), 0)
+		c.hlsTouch(clientIP(r), r.UserAgent(), 0)
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Write(pl)
@@ -1906,7 +1917,7 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	n, _ := w.Write(data)
 	c.outBytes.Add(uint64(n))
-	c.hlsTouch(clientIP(r), uint64(n))
+	c.hlsTouch(clientIP(r), r.UserAgent(), uint64(n))
 }
 
 func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
@@ -2177,6 +2188,9 @@ td.t{font-family:inherit}
 .k-video{color:#7cc4ff}.k-audio{color:#b69cff}.k-psi{color:var(--mut)}.k-teletext,.k-subtitle{color:#7fd6b6}
 .cols{display:grid;grid-template-columns:2fr 1fr;gap:16px}
 h4{margin:0 0 8px;font-size:12px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+.tabs{display:flex;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:3px}.tabs button{border:0;background:none;padding:5px 12px;color:var(--mut)}.tabs button.on{background:var(--panel);color:var(--text);box-shadow:0 0 0 1px var(--line)}
+.ctab{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:auto}.ctab table{min-width:760px}.ctab td,.ctab th{padding:8px 12px}.ctab tr:hover td{background:var(--panel2)}.ua{color:var(--mut);font-family:inherit;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fil{display:flex;gap:10px;align-items:center;margin-bottom:10px}.fil input{max-width:280px}
 .empty{text-align:center;color:var(--mut);padding:60px 20px}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;z-index:20;overflow:auto}
 .modal.hidden{display:none}
@@ -2192,11 +2206,12 @@ input:focus,textarea:focus{outline:none;border-color:var(--acc)}
 .hint code{font-family:var(--mono);color:#aab4c3}
 .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 .msg{color:var(--bad);font-size:13px;margin-top:10px}
-@media(max-width:900px){header{padding:10px 14px;gap:10px}.brand{flex:1}#sum{order:3;flex-basis:100%;gap:6px 14px;font-size:12px}main{padding:12px 12px 32px}.row{grid-template-columns:12px 1fr 90px;row-gap:6px}.in,.row .num:nth-child(5),.row .num:nth-child(6),.row .num:nth-child(7){display:none}.ops{grid-column:1/-1}.cols{grid-template-columns:1fr}}
+@media(max-width:900px){header{padding:10px 14px;gap:10px}.brand{flex:1}.tabs{order:4}#sum{order:3;flex-basis:100%;gap:6px 14px;font-size:12px}main{padding:12px 12px 32px}.row{grid-template-columns:12px 1fr 90px;row-gap:6px}.in,.row .num:nth-child(5),.row .num:nth-child(6),.row .num:nth-child(7){display:none}.ops{grid-column:1/-1}.cols{grid-template-columns:1fr}}
 </style></head><body>
 <header>
   <div class="brand">Stream<span>Hub</span></div>
   <div id="sum"></div>
+  <div class="tabs"><button id="t_ch" class="on" onclick="setView('ch')">Canale</button><button id="t_cl" onclick="setView('cl')">Clienți</button></div>
   <button onclick="openSettings()">Setări</button>
   <button class="pri" onclick="editCh(null)">+ Canal</button>
 </header>
@@ -2214,6 +2229,23 @@ function hex(p){var h=p.toString(16).toUpperCase();while(h.length<4)h='0'+h;retu
 function tok(){return cfg.tokens&&cfg.tokens.length?cfg.tokens[0]:'';}
 function outs(c){var b=location.origin,q=(!c.public&&tok())?'?token='+encodeURIComponent(tok()):'',r=[];
   if(c.http)r.push(['HTTP',b+'/play/'+c.id+q]);if(c.hls)r.push(['HLS',b+'/hls/'+c.id+'/index.m3u8'+q]);if(c.udp)r.push(['UDP',c.udp]);return r;}
+var view='ch',filt='';
+function setView(v){view=v;document.getElementById('t_ch').className=v==='ch'?'on':'';document.getElementById('t_cl').className=v==='cl'?'on':'';render();}
+function size(b){b=b||0;return b>=1e9?(b/1e9).toFixed(2)+' GB':b>=1e6?(b/1e6).toFixed(1)+' MB':(b/1e3).toFixed(0)+' KB';}
+function player(ua){ua=ua||'';var m=[[/VLC|LibVLC/i,'VLC'],[/TiviMate/i,'TiviMate'],[/Kodi/i,'Kodi'],[/Smarters/i,'IPTV Smarters'],[/OTT ?Navigator/i,'OTT Navigator'],[/Perfect ?Player/i,'Perfect Player'],[/ExoPlayer|ExoPlayerLib/i,'ExoPlayer (Android)'],[/Lavf|ffmpeg|ffprobe/i,'FFmpeg'],[/Astra/i,'Astra'],[/StreamHub/i,'StreamHub'],[/mpv/i,'mpv'],[/Tizen|SMART-TV|SmartTV/i,'Samsung TV'],[/Web0S|webOS|NetCast/i,'LG TV'],[/AppleCoreMedia|iPhone|iPad/i,'iOS'],[/Edg\//i,'Edge'],[/Chrome/i,'Chrome'],[/Firefox/i,'Firefox'],[/Safari/i,'Safari'],[/curl/i,'curl'],[/wget/i,'wget']];
+  for(var i=0;i<m.length;i++)if(m[i][0].test(ua))return m[i][1];return ua?ua.split(/[\/ ]/)[0]:'—';}
+function renderClients(){
+  var rows=[];st.channels.forEach(function(c){c.clients.forEach(function(x){rows.push({c:c,x:x});});});
+  var f=filt.toLowerCase();if(f)rows=rows.filter(function(r){return (r.x.addr+' '+(r.c.name||'')+' '+r.c.id+' '+player(r.x.ua)+' '+r.x.type).toLowerCase().indexOf(f)>=0;});
+  rows.sort(function(a,b){return b.x.kbps-a.x.kbps;});
+  var ips={};rows.forEach(function(r){ips[r.x.addr]=1;});
+  var h='<div class="fil"><input type="text" id="cf" placeholder="Caută IP, canal, player…" value="'+esc(filt)+'" oninput="filt=this.value;render();var e=document.getElementById(\'cf\');e.focus();e.setSelectionRange(e.value.length,e.value.length);"><span class="hint">'+rows.length+' conexiuni · '+Object.keys(ips).length+' IP-uri unice</span></div>';
+  if(!rows.length)return h+'<div class="empty">Niciun client conectat.</div>';
+  h+='<div class="ctab"><table><tr><th>IP client</th><th>Canal</th><th>Format</th><th>Player</th><th style="text-align:right">Viteză</th><th style="text-align:right">Transferat</th><th style="text-align:right">Conectat de</th></tr>';
+  rows.forEach(function(r){var x=r.x,c=r.c;
+    h+='<tr><td>'+esc(x.addr)+'</td><td class="t"><b>'+esc(c.name||c.id)+'</b> <span style="color:var(--mut)">'+esc(c.id)+'</span></td><td class="t">'+x.type+'</td><td class="ua" title="'+esc(x.ua)+'">'+esc(player(x.ua))+'</td><td style="text-align:right">'+rate(x.kbps||0)+'</td><td style="text-align:right">'+size(x.bytes)+'</td><td style="text-align:right">'+dur(x.secs)+'</td></tr>';});
+  return h+'</table></div>';
+}
 function tog(id){opened[id]=!opened[id];render();}
 function render(){
   if(!st)return;var L=document.getElementById('list'),h='',on=0,en=0,bw=0,ob=0,cl=0,cc=0;
@@ -2240,12 +2272,14 @@ function render(){
       c.pids.forEach(function(p){h+='<tr><td>'+hex(p.pid)+' <span style="color:var(--mut)">'+p.pid+'</span></td><td class="t k-'+p.kind+'">'+esc(p.type)+(p.scrambled?' <span class="tag r">criptat</span>':'')+'</td><td>'+esc(p.lang||'')+'</td><td style="text-align:right">'+rate(p.kbps)+'</td><td style="text-align:right"'+(p.cc?' class="warn-t"':'')+'>'+p.cc+'</td></tr>';});
       h+='</table>';}else h+='<div class="hint">Fără date.</div>';
     h+='</div><div><h4>Clienți</h4>';
-    if(c.clients.length){h+='<table>';c.clients.forEach(function(x){h+='<tr><td>'+esc(x.addr)+'</td><td class="t">'+x.type+'</td><td style="text-align:right">'+rate(x.kbps||0)+'</td><td style="text-align:right">'+(x.type==='HTTP'?dur(x.secs):'')+'</td></tr>';});h+='</table>';}else h+='<div class="hint">Niciun client conectat.</div>';
+    if(c.clients.length){h+='<table>';c.clients.forEach(function(x){h+='<tr><td>'+esc(x.addr)+'</td><td class="t">'+x.type+'</td><td class="ua" title="'+esc(x.ua)+'">'+esc(player(x.ua))+'</td><td style="text-align:right">'+rate(x.kbps||0)+'</td><td style="text-align:right">'+dur(x.secs)+'</td></tr>';});h+='</table>';}else h+='<div class="hint">Niciun client conectat.</div>';
     if(c.hls)h+='<div class="hint" style="margin-top:10px">Segmente HLS în memorie: '+c.hls_segs+'</div>';
     if(c.switches)h+='<div class="hint">Comutări sursă: '+c.switches+'</div>';
     h+='</div></div></div></div>';
   });
+  if(view==='cl')h=renderClients();
   L.innerHTML=h||'<div class="empty">Niciun canal. Apasă <b>+ Canal</b> ca să adaugi primul.</div>';
+  document.getElementById('t_cl').textContent='Clienți ('+cl+')';
   document.getElementById('sum').innerHTML='<span>Online <b>'+on+'/'+en+'</b></span><span>Intrare <b>'+rate(bw)+'</b></span><span>Ieșire <b>'+rate(ob)+'</b></span><span>Clienți <b>'+cl+'</b></span><span>Erori CC <b>'+cc+'</b></span><span>Uptime <b>'+dur(st.uptime)+'</b></span>';
 }
 function cp(b,t){var done=function(){b.textContent='Copiat';setTimeout(function(){b.textContent='Copiază';},1200);};

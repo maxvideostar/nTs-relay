@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	version = "1.1.0"
+	version = "1.2.0"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -1284,19 +1284,24 @@ type Subscriber struct {
 	addr  string
 	start time.Time
 	ready bool // a primit deja un keyframe
+	ua    string
 	bytes atomic.Uint64
 	kbps  atomic.Int64
 	prev  uint64
 }
 
 type ClientInfo struct {
-	Addr string `json:"addr"`
-	Type string `json:"type"`
-	Secs int64  `json:"secs"`
-	Kbps int    `json:"kbps"`
+	Addr  string `json:"addr"`
+	Type  string `json:"type"`
+	Secs  int64  `json:"secs"`
+	Kbps  int    `json:"kbps"`
+	UA    string `json:"ua"`
+	Bytes uint64 `json:"bytes"`
 }
 
 type hlsClient struct {
+	first time.Time
+	ua    string
 	seen  time.Time
 	bytes uint64
 	prev  uint64
@@ -1584,12 +1589,13 @@ func (c *Channel) onData(chunk []byte) {
 	}
 }
 
-func (c *Channel) hlsTouch(ip string, n uint64) {
+func (c *Channel) hlsTouch(ip, ua string, n uint64) {
 	c.subMu.Lock()
-	h := c.hlsSeen[ip]
+	key := ip + "|" + ua // mai mulți playeri în spatele aceluiași IP
+	h := c.hlsSeen[key]
 	if h == nil {
-		h = &hlsClient{}
-		c.hlsSeen[ip] = h
+		h = &hlsClient{first: time.Now(), ua: ua}
+		c.hlsSeen[key] = h
 	}
 	h.seen = time.Now()
 	h.bytes += n
@@ -1648,11 +1654,12 @@ func (c *Channel) Status() ChanStatus {
 	c.subMu.Lock()
 	s.Clients = []ClientInfo{}
 	for sub := range c.subs {
-		s.Clients = append(s.Clients, ClientInfo{Addr: sub.addr, Type: "HTTP", Secs: int64(time.Since(sub.start).Seconds()), Kbps: int(sub.kbps.Load())})
+		s.Clients = append(s.Clients, ClientInfo{Addr: sub.addr, Type: "HTTP", Secs: int64(time.Since(sub.start).Seconds()), Kbps: int(sub.kbps.Load()), UA: sub.ua, Bytes: sub.bytes.Load()})
 	}
-	for ip, h := range c.hlsSeen {
-		s.Clients = append(s.Clients, ClientInfo{Addr: ip, Type: "HLS", Kbps: h.kbps})
+	for key, h := range c.hlsSeen {
+		s.Clients = append(s.Clients, ClientInfo{Addr: strings.SplitN(key, "|", 2)[0], Type: "HLS", Secs: int64(time.Since(h.first).Seconds()), Kbps: h.kbps, UA: h.ua, Bytes: h.bytes})
 	}
+	sort.Slice(s.Clients, func(i, j int) bool { return s.Clients[i].Secs > s.Clients[j].Secs })
 	c.subMu.Unlock()
 	if c.hls != nil {
 		s.HLSSegs = c.hls.Count()
@@ -1723,14 +1730,18 @@ func (s *Server) channel(id string) *Channel {
 	return s.channels[id]
 }
 
+// clientIP: IP-ul real al clientului. Headerele de proxy sunt crezute doar
+// când cererea vine de pe aceeași mașină (nginx local), altfel ar putea fi falsificate.
 func clientIP(r *http.Request) string {
-	if x := r.Header.Get("X-Real-IP"); x != "" {
-		return x
-	}
-	if x := r.Header.Get("X-Forwarded-For"); x != "" {
-		return strings.TrimSpace(strings.Split(x, ",")[0])
-	}
 	h, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+		if x := r.Header.Get("X-Real-IP"); x != "" {
+			return strings.TrimSpace(x)
+		}
+		if x := r.Header.Get("X-Forwarded-For"); x != "" {
+			return strings.TrimSpace(strings.Split(x, ",")[0])
+		}
+	}
 	return h
 }
 
@@ -1764,7 +1775,7 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "acces interzis", 403)
 		return
 	}
-	sub := &Subscriber{ch: make(chan []byte, 4096), addr: clientIP(r), start: time.Now()}
+	sub := &Subscriber{ch: make(chan []byte, 4096), addr: clientIP(r), start: time.Now(), ua: r.UserAgent()}
 	c.addSub(sub)
 	defer c.removeSub(sub)
 	h := w.Header()
@@ -1836,7 +1847,7 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "stream indisponibil", 503)
 			return
 		}
-		c.hlsTouch(clientIP(r), 0)
+		c.hlsTouch(clientIP(r), r.UserAgent(), 0)
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Write(pl)
@@ -1857,7 +1868,7 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	n, _ := w.Write(data)
 	c.outBytes.Add(uint64(n))
-	c.hlsTouch(clientIP(r), uint64(n))
+	c.hlsTouch(clientIP(r), r.UserAgent(), uint64(n))
 }
 
 func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
