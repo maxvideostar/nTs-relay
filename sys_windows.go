@@ -133,7 +133,7 @@ Start-ScheduledTask -TaskName %s`,
 	}
 	fmt.Println("StreamHub rulează acum în fundal și pornește automat odată cu Windows.")
 	fmt.Println("Config:", cfgAbs)
-	fmt.Println("Panou:  http://127.0.0.1:8000/  (sau portul din config)")
+	fmt.Println("Panou:  http://127.0.0.1:4000/  (sau portul din config)")
 	fmt.Println("Pentru oprire definitivă: streamhub.exe -uninstall")
 	return nil
 }

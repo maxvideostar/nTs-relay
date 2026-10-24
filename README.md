@@ -6,7 +6,7 @@ Fluxul TS trece **neatins, byte cu byte**: PAT, PMT, PID-urile video/audio, tele
 ## Instalare
 
 ```bash
-sudo bash install-streamhub.sh            # port implicit 8000
+sudo bash install-streamhub.sh            # port implicit 4000
 sudo PORT=8100 bash install-streamhub.sh  # port custom
 ```
 
@@ -18,7 +18,7 @@ Rulat din nou, actualizează binarul și păstrează config-ul.
 
 Descarcă `streamhub-<versiune>-windows-x64.zip` din [Releases](https://github.com/maxvideostar/nTs-relay/releases),
 pune `streamhub.exe` într-un folder fix (ex. `C:\StreamHub`) și dă dublu-click: creează `config.json` lângă exe
-și deschide panoul în browser.
+și deschide panoul în browser (http://127.0.0.1:4000/).
 
 - `streamhub.exe -install` — pornire automată cu Windows, în fundal (task programat ca SYSTEM, repornire automată) + regulă de firewall
 - `streamhub.exe -uninstall` — oprește și elimină pornirea automată
@@ -41,13 +41,15 @@ Mai multe intrări pe un canal = backup automat: comutare în ~5s, revenire pe s
 ## Ieșiri
 
 - **Clienți:** tabul „Clienți” din panou arată IP, canal, format, player, viteză, transferat și durata fiecărei conexiuni
-- **HTTP-TS:** `http://IP:8000/play/<id>?token=<token>` — clienții noi pornesc pe keyframe, cu PAT/PMT în față
-- **HLS:** `http://IP:8000/hls/<id>/index.m3u8?token=<token>` — segmente în memorie, tăiate pe keyframe
+- **HTTP-TS:** `http://IP:4000/<id>` (ex. `http://netstreaming.eu:4000/hd365`, compatibil cu linkurile Astra) — clienții noi pornesc pe keyframe, cu PAT/PMT în față
+- **HLS:** `http://IP:4000/<id>.m3u8` sau `http://IP:4000/<id>/index.m3u8` — segmente în memorie, tăiate pe keyframe
+- ID-ul nu ține cont de litere mari/mici (`/HD365` = `/hd365`); formele vechi `/play/<id>` și `/hls/<id>/index.m3u8` merg în continuare
+- canalele ne-publice cer `?token=<token>` la final
 - **UDP/multicast:** `udp://[iface@]239.10.0.1:1234?ttl=8`
 
 ## Panou web
 
-`http://IP:8000/` (autentificare admin): status canale, bitrate, erori CC per PID, limbi, stream criptat,
+`http://IP:4000/` (autentificare admin): status canale, bitrate, erori CC per PID, limbi, stream criptat,
 clienți conectați, adăugare/editare/ștergere canale, tokeni, setări HLS.
 
 ## API (Basic Auth)

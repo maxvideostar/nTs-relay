@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	version = "1.3.1"
+	version = "1.4.0"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -718,7 +718,7 @@ func (h *HLSSeg) Discontinuity() {
 	h.mu.Unlock()
 }
 
-func (h *HLSSeg) Playlist(q string) ([]byte, bool) {
+func (h *HLSSeg) Playlist(prefix, q string) ([]byte, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	n := len(h.segs)
@@ -748,7 +748,7 @@ func (h *HLSSeg) Playlist(q string) ([]byte, bool) {
 		if s.Disc {
 			b.WriteString("#EXT-X-DISCONTINUITY\n")
 		}
-		fmt.Fprintf(&b, "#EXTINF:%.3f,\n%d.ts%s\n", s.Dur, s.Seq, q)
+		fmt.Fprintf(&b, "#EXTINF:%.3f,\n%s%d.ts%s\n", s.Dur, prefix, s.Seq, q)
 	}
 	return []byte(b.String()), true
 }
@@ -1699,7 +1699,7 @@ func NewServer(path string) (*Server, error) {
 	b, err := os.ReadFile(path)
 	cfg := &Config{}
 	if errors.Is(err, os.ErrNotExist) {
-		cfg = &Config{Listen: ":8000", AdminUser: "admin", AdminPass: randHex(6), Tokens: []string{}, HLSSegment: 4, HLSWindow: 6}
+		cfg = &Config{Listen: ":4000", AdminUser: "admin", AdminPass: randHex(6), Tokens: []string{}, HLSSegment: 4, HLSWindow: 6}
 		s.cfg = cfg
 		if err := s.save(); err != nil {
 			return nil, err
@@ -1711,7 +1711,7 @@ func NewServer(path string) (*Server, error) {
 		return nil, fmt.Errorf("config invalid: %v", err)
 	}
 	if cfg.Listen == "" {
-		cfg.Listen = ":8000"
+		cfg.Listen = ":4000"
 	}
 	if cfg.HLSSegment <= 0 {
 		cfg.HLSSegment = 4
@@ -1740,10 +1740,37 @@ func (s *Server) save() error {
 	return os.Rename(tmp, s.cfgPath)
 }
 
+// channel: potrivire exactă, apoi fără diferență între litere mari/mici (/HD365 = /hd365)
 func (s *Server) channel(id string) *Channel {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.channels[id]
+	if c := s.channels[id]; c != nil {
+		return c
+	}
+	for k, c := range s.channels {
+		if strings.EqualFold(k, id) {
+			return c
+		}
+	}
+	return nil
+}
+
+// handleShort: link scurt, compatibil Astra
+//
+//	/hd365        → HTTP-TS   (și /hd365.ts)
+//	/hd365.m3u8   → HLS
+func (s *Server) handleShort(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if base, ok := strings.CutSuffix(id, ".m3u8"); ok {
+		c := s.channel(base)
+		if c == nil || c.hls == nil {
+			http.Error(w, "canal inexistent", 404)
+			return
+		}
+		s.serveHLS(w, r, c, "index.m3u8", url.PathEscape(base)+"/")
+		return
+	}
+	s.handlePlay(w, r)
 }
 
 // clientIP: IP-ul real al clientului. Headerele de proxy sunt crezute doar
@@ -1847,18 +1874,21 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "canal inexistent", 404)
 		return
 	}
+	s.serveHLS(w, r, c, r.PathValue("file"), "")
+}
+
+func (s *Server) serveHLS(w http.ResponseWriter, r *http.Request, c *Channel, file, prefix string) {
 	if !s.allowed(r, c) {
 		http.Error(w, "acces interzis", 403)
 		return
 	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	file := r.PathValue("file")
-	if file == "index.m3u8" || file == "playlist.m3u8" {
+	if file == "index.m3u8" || file == "playlist.m3u8" || file == "mono.m3u8" {
 		q := ""
 		if t := r.URL.Query().Get("token"); t != "" {
 			q = "?token=" + url.QueryEscape(t)
 		}
-		pl, ok := c.hls.Playlist(q)
+		pl, ok := c.hls.Playlist(prefix, q)
 		if !ok {
 			http.Error(w, "stream indisponibil", 503)
 			return
@@ -1937,6 +1967,11 @@ func (s *Server) apiChannelSave(w http.ResponseWriter, r *http.Request) {
 	in.ID = strings.TrimSpace(in.ID)
 	if !idRe.MatchString(in.ID) {
 		http.Error(w, "ID invalid (litere, cifre, - sau _)", 400)
+		return
+	}
+	switch strings.ToLower(in.ID) {
+	case "api", "hls", "play", "favicon":
+		http.Error(w, "ID rezervat: "+in.ID, 400)
 		return
 	}
 	var ins []string
@@ -2100,6 +2135,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /play/{id}", s.handlePlay)
 	mux.HandleFunc("GET /hls/{id}/{file}", s.handleHLS)
+	mux.HandleFunc("GET /{id}", s.handleShort)      // http://server:4000/hd365  (+ .m3u8)
+	mux.HandleFunc("GET /{id}/{file}", s.handleHLS) // http://server:4000/hd365/index.m3u8
 	mux.HandleFunc("GET /api/status", s.admin(s.apiStatus))
 	mux.HandleFunc("GET /api/config", s.admin(s.apiConfig))
 	mux.HandleFunc("POST /api/channel", s.admin(s.apiChannelSave))

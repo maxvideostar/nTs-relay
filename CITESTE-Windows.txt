@@ -4,7 +4,7 @@ StreamHub pentru Windows 10 / 11 (64-bit)
 1. Pune streamhub.exe într-un folder fix, de exemplu C:\StreamHub
 2. Dublu-click pe streamhub.exe
    - prima dată creează config.json lângă exe (parola de admin apare în fereastră)
-   - se deschide singur panoul în browser: http://127.0.0.1:8000/
+   - se deschide singur panoul în browser: http://127.0.0.1:4000/
    - Windows întreabă de Firewall -> Permite accesul (rețele private și publice)
 3. Adaugă canale din panou (+ Canal).
 
@@ -22,5 +22,5 @@ SRT și RTMP au nevoie de ffmpeg.exe: descarcă-l (ex. de pe gyan.dev,
 UDP, RTP, HTTP și HLS merg fără ffmpeg.
 
 Linkuri de ieșire (înlocuiește IP-ul și ID-ul canalului):
-   http://IP:8000/play/<id>?token=<token>
-   http://IP:8000/hls/<id>/index.m3u8?token=<token>
+   http://IP:4000/<id>              (ex. http://IP:4000/hd365)
+   http://IP:4000/<id>.m3u8         (canalele ne-publice: ?token=<token>)

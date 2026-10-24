@@ -1,5 +1,5 @@
 {
-  "listen": ":8000",
+  "listen": ":4000",
   "admin_user": "admin",
   "admin_pass": "schimba-parola",
   "tokens": ["token-secret"],
