@@ -14,6 +14,18 @@ Scriptul instalează Go (dacă lipsește), ffmpeg și srt-tools, compilează bin
 creează `/etc/streamhub/config.json` (parolă admin și token generate automat) și serviciul systemd `streamhub`.
 Rulat din nou, actualizează binarul și păstrează config-ul.
 
+## Migrare de pe Astra Cesbo
+
+```bash
+sudo bash migrate-astra.sh           # arată ce a găsit, nu schimbă nimic
+sudo bash migrate-astra.sh --apply   # oprește Astra și pornește StreamHub cu aceleași linkuri
+```
+
+Găsește Astra (proces, systemd, cron, rc.local), citește canalele din scripturile Lua (`make_channel`)
+sau din `astra.conf` (JSON) și păstrează porturile și căile linkurilor HTTP (`:4000/hd365`), intrările de
+rezervă, `#pnr=` și ieșirile UDP. Dacă nu găsește config-ul singur: `sudo bash migrate-astra.sh /cale/config.lua`.
+Revenire la Astra: `bash /root/astra-rollback.sh`.
+
 ## Windows
 
 Descarcă `streamhub-<versiune>-windows-x64.zip` din [Releases](https://github.com/maxvideostar/nTs-relay/releases),
@@ -29,6 +41,7 @@ pune `streamhub.exe` într-un folder fix (ex. `C:\StreamHub`) și dă dublu-clic
 | Format | Exemplu | PID-uri originale |
 |---|---|---|
 | UDP multicast/unicast | `udp://eth0@239.1.1.1:1234`, `udp://0.0.0.0:5000` | da |
+| un program dintr-un MPTS (ca la Astra) | `udp://eth0@239.1.1.1:1234#pnr=101` | da — PAT regenerat, SDT/EIT doar pentru programul ales |
 | RTP | `rtp://@239.1.1.1:5000` | da |
 | HTTP-TS | `http://server/stream.ts` | da |
 | HLS (segmente .ts, AES-128) | `http://server/live.m3u8` | da |
@@ -70,7 +83,7 @@ clienți conectați, adăugare/editare/ștergere canale, tokeni, setări HLS.
 ./build.sh   # dist/: streamhub-linux-amd64, streamhub-linux-arm64, streamhub.exe, zip Windows
 ```
 
-Exemplu de configurare: [`config.example.json`](config.example.json). Loguri: `journalctl -u streamhub -f`.
+Exemplu de configurare: [`config.example.json`](config.example.json). Porturi suplimentare: `"listen_extra": [":7000"]`. Loguri: `journalctl -u streamhub -f`.
 
 ## Limitări
 

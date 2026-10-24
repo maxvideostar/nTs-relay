@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	version = "1.4.0"
+	version = "1.5.0"
 	tsSize  = 188
 	ua      = "StreamHub/" + version
 )
@@ -54,13 +54,14 @@ type ChannelConfig struct {
 }
 
 type Config struct {
-	Listen     string           `json:"listen"`
-	AdminUser  string           `json:"admin_user"`
-	AdminPass  string           `json:"admin_pass"`
-	Tokens     []string         `json:"tokens"`
-	HLSSegment int              `json:"hls_segment"`
-	HLSWindow  int              `json:"hls_window"`
-	Channels   []*ChannelConfig `json:"channels"`
+	Listen      string           `json:"listen"`
+	ListenExtra []string         `json:"listen_extra,omitempty"` // porturi suplimentare, ex. [":7000"]
+	AdminUser   string           `json:"admin_user"`
+	AdminPass   string           `json:"admin_pass"`
+	Tokens      []string         `json:"tokens"`
+	HLSSegment  int              `json:"hls_segment"`
+	HLSWindow   int              `json:"hls_window"`
+	Channels    []*ChannelConfig `json:"channels"`
 }
 
 func randHex(n int) string {
@@ -1256,7 +1257,26 @@ func hasSRTffmpeg() bool {
 }
 
 func openInput(ctx context.Context, src string, out func([]byte)) error {
-	u, err := url.Parse(strings.TrimSpace(src))
+	src = strings.TrimSpace(src)
+	// opțiuni stil Astra după '#', ex. udp://239.1.1.1:1234#pnr=101
+	if base, opts, ok := strings.Cut(src, "#"); ok {
+		src = base
+		for _, o := range strings.Split(opts, "&") {
+			if v, ok := strings.CutPrefix(o, "pnr="); ok {
+				n, err := strconv.Atoi(v)
+				if err != nil || n <= 0 || n > 65535 {
+					return fmt.Errorf("pnr invalid: %s", v)
+				}
+				f, next := newPNRFilter(n), out
+				out = func(b []byte) {
+					if fb := f.Filter(b); len(fb) > 0 {
+						next(fb)
+					}
+				}
+			}
+		}
+	}
+	u, err := url.Parse(src)
 	if err != nil {
 		return fmt.Errorf("URL invalid: %v", err)
 	}
@@ -2157,5 +2177,13 @@ func main() {
 		openBrowser("http://127.0.0.1:" + port + "/")
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	for _, extra := range s.cfg.ListenExtra {
+		l2, err := net.Listen("tcp", extra)
+		if err != nil {
+			fatal(fmt.Errorf("nu pot asculta pe %s: %v", extra, err))
+		}
+		log.Printf("ascult și pe %s", extra)
+		go func() { fatal(srv.Serve(l2)) }()
+	}
 	fatal(srv.Serve(ln))
 }
