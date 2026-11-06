@@ -51,6 +51,7 @@ type ChannelConfig struct {
 	HLS     bool     `json:"hls"`
 	UDP     string   `json:"udp"`
 	Public  bool     `json:"public"`
+	Port    string   `json:"port,omitempty"` // port propriu, ca la Astra: "4003" sau "192.168.88.247:4003" → http://server:4003/
 }
 
 type Config struct {
@@ -1710,12 +1711,21 @@ type Server struct {
 	cfg      *Config
 	cfgPath  string
 	channels map[string]*Channel
+	ports    map[string]*portListener // adresă normalizată → listener dedicat unui canal
+	portErr  map[string]string        // id canal → eroare la deschiderea portului
+}
+
+// portListener: un port deschis doar pentru un canal (stil Astra: http://server:4003/)
+type portListener struct {
+	addr string
+	id   string // canalul servit (se poate schimba fără redeschiderea portului)
+	srv  *http.Server
 }
 
 var idRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 func NewServer(path string) (*Server, error) {
-	s := &Server{cfgPath: path, channels: map[string]*Channel{}}
+	s := &Server{cfgPath: path, channels: map[string]*Channel{}, ports: map[string]*portListener{}, portErr: map[string]string{}}
 	b, err := os.ReadFile(path)
 	cfg := &Config{}
 	if errors.Is(err, os.ErrNotExist) {
@@ -1744,6 +1754,9 @@ func NewServer(path string) (*Server, error) {
 	}
 	s.cfg = cfg
 	for _, ch := range cfg.Channels {
+		if a, err := normPort(ch.Port); err == nil {
+			ch.Port = a
+		}
 		if ch.Enabled {
 			s.channels[ch.ID] = NewChannel(*ch, cfg.HLSSegment, cfg.HLSWindow)
 		}
@@ -1829,7 +1842,10 @@ func (s *Server) allowed(r *http.Request, c *Channel) bool {
 
 func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSuffix(r.PathValue("id"), ".ts")
-	c := s.channel(id)
+	s.servePlay(w, r, s.channel(id))
+}
+
+func (s *Server) servePlay(w http.ResponseWriter, r *http.Request, c *Channel) {
 	if c == nil || !c.cfg.HTTP {
 		http.Error(w, "canal inexistent", 404)
 		return
@@ -1885,6 +1901,153 @@ func (s *Server) handlePlay(w http.ResponseWriter, r *http.Request) {
 				fl.Flush()
 			}
 		}
+	}
+}
+
+// ============================== PORTURI PE CANAL ==============================
+
+// normPort: "4003" / ":4003" / "ip:4003" → adresă de ascultare; "" = fără port propriu
+func normPort(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	p = strings.TrimPrefix(strings.TrimPrefix(p, "http://"), "https://")
+	p = strings.TrimSuffix(p, "/")
+	if p == "" {
+		return "", nil
+	}
+	if _, err := strconv.Atoi(p); err == nil {
+		p = ":" + p
+	}
+	h, ps, err := net.SplitHostPort(p)
+	if err != nil {
+		return "", fmt.Errorf("port invalid: %s (ex: 4003 sau 192.168.88.247:4003)", p)
+	}
+	n, err := strconv.Atoi(ps)
+	if err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("port invalid: %s", ps)
+	}
+	if h == "0.0.0.0" {
+		h = ""
+	}
+	return net.JoinHostPort(h, strconv.Itoa(n)), nil
+}
+
+func portNum(addr string) string {
+	_, p, _ := net.SplitHostPort(addr)
+	return p
+}
+
+// portClash: portul se bate cu listen / listen_extra sau cu alt canal?
+func (s *Server) portClash(addr, selfID, oldID string) string {
+	pn := portNum(addr)
+	main := append([]string{s.cfg.Listen}, s.cfg.ListenExtra...)
+	for _, m := range main {
+		if portNum(m) == pn {
+			return "portul " + pn + " e folosit de panou / linkurile scurte (" + m + ")"
+		}
+	}
+	for _, cc := range s.cfg.Channels {
+		if cc.ID == selfID || cc.ID == oldID || cc.Port == "" {
+			continue
+		}
+		if a, err := normPort(cc.Port); err == nil && portNum(a) == pn {
+			return "portul " + pn + " e deja folosit de canalul " + cc.ID
+		}
+	}
+	return ""
+}
+
+// handlePort: tot ce vine pe portul canalului e canalul respectiv
+//
+//	/  sau  /orice   → HTTP-TS  (Astra: http://ip:4003/  și  http://ip:4007/astv)
+//	/orice.m3u8      → HLS
+//	/hls/<n>.ts      → segmente HLS
+func (s *Server) handlePort(pl *portListener) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "metodă nepermisă", 405)
+			return
+		}
+		s.mu.RLock()
+		id := pl.id
+		s.mu.RUnlock()
+		c := s.channel(id)
+		if c == nil {
+			http.Error(w, "canal oprit", 404)
+			return
+		}
+		p := r.URL.Path
+		switch {
+		case strings.HasSuffix(p, ".m3u8"):
+			if c.hls == nil {
+				http.Error(w, "HLS dezactivat", 404)
+				return
+			}
+			s.serveHLS(w, r, c, "index.m3u8", "/hls/")
+		case strings.HasPrefix(p, "/hls/"):
+			if c.hls == nil {
+				http.Error(w, "HLS dezactivat", 404)
+				return
+			}
+			s.serveHLS(w, r, c, strings.TrimPrefix(p, "/hls/"), "")
+		case p == "/favicon.ico":
+			http.NotFound(w, r)
+		default:
+			s.servePlay(w, r, c)
+		}
+	}
+}
+
+// syncPorts deschide / închide porturile canalelor după config. Apelat cu s.mu ținut.
+func (s *Server) syncPorts() {
+	want := map[string]string{} // adresă → id
+	s.portErr = map[string]string{}
+	for _, cc := range s.cfg.Channels {
+		a, err := normPort(cc.Port)
+		if err != nil {
+			s.portErr[cc.ID] = err.Error()
+			continue
+		}
+		if a == "" {
+			continue
+		}
+		if msg := s.portClash(a, cc.ID, ""); msg != "" {
+			s.portErr[cc.ID] = msg
+			continue
+		}
+		if _, dup := want[a]; dup {
+			s.portErr[cc.ID] = "port dublat " + a
+			continue
+		}
+		want[a] = cc.ID
+	}
+	for a, pl := range s.ports {
+		if id, ok := want[a]; ok {
+			pl.id = id
+			continue
+		}
+		pl.srv.Close()
+		delete(s.ports, a)
+		log.Printf("port închis: %s", a)
+	}
+	for a, id := range want {
+		if _, ok := s.ports[a]; ok {
+			continue
+		}
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			s.portErr[id] = fmt.Sprintf("nu pot asculta pe %s: %v", a, err)
+			log.Printf("[%s] %s", id, s.portErr[id])
+			continue
+		}
+		pl := &portListener{addr: a, id: id}
+		pl.srv = &http.Server{Handler: s.handlePort(pl), ReadHeaderTimeout: 10 * time.Second}
+		s.ports[a] = pl
+		log.Printf("[%s] port propriu: %s", id, a)
+		go func() {
+			if err := pl.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("port %s: %v", pl.addr, err)
+			}
+		}()
 	}
 }
 
@@ -1967,6 +2130,14 @@ func (s *Server) apiStatus(w http.ResponseWriter, r *http.Request) {
 		} else {
 			list = append(list, ChanStatus{ChannelConfig: *cc, Clients: []ClientInfo{}})
 		}
+		if e := s.portErr[cc.ID]; e != "" {
+			st := &list[len(list)-1]
+			if st.Error != "" {
+				st.Error = e + " · " + st.Error
+			} else {
+				st.Error = e
+			}
+		}
 	}
 	s.mu.RUnlock()
 	writeJSON(w, map[string]any{"version": version, "uptime": int64(time.Since(startTime).Seconds()), "channels": list})
@@ -2014,8 +2185,20 @@ func (s *Server) apiChannelSave(w http.ResponseWriter, r *http.Request) {
 	}
 	old := r.URL.Query().Get("old") // gol = canal nou
 	creating := old == ""
+	pa, err := normPort(in.Port)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	in.Port = pa
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if pa != "" {
+		if msg := s.portClash(pa, in.ID, old); msg != "" {
+			http.Error(w, msg, 409)
+			return
+		}
+	}
 	pos := -1
 	for i, c := range s.cfg.Channels {
 		if !creating && c.ID == old {
@@ -2042,11 +2225,16 @@ func (s *Server) apiChannelSave(w http.ResponseWriter, r *http.Request) {
 	if cp.Enabled {
 		s.channels[cp.ID] = NewChannel(cp, s.cfg.HLSSegment, s.cfg.HLSWindow)
 	}
+	s.syncPorts()
 	if err := s.save(); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 	log.Printf("canal salvat: %s", cp.ID)
+	if e := s.portErr[cp.ID]; e != "" {
+		http.Error(w, "canal salvat, dar: "+e, 409)
+		return
+	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -2065,6 +2253,7 @@ func (s *Server) apiChannelDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.cfg.Channels = out
+	s.syncPorts()
 	s.save()
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -2177,6 +2366,9 @@ func main() {
 		openBrowser("http://127.0.0.1:" + port + "/")
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	s.mu.Lock()
+	s.syncPorts()
+	s.mu.Unlock()
 	for _, extra := range s.cfg.ListenExtra {
 		l2, err := net.Listen("tcp", extra)
 		if err != nil {

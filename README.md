@@ -55,6 +55,7 @@ Mai multe intrări pe un canal = backup automat: comutare în ~5s, revenire pe s
 
 - **Clienți:** tabul „Clienți” din panou arată IP, canal, format, player, viteză, transferat și durata fiecărei conexiuni
 - **HTTP-TS:** `http://IP:4000/<id>` (ex. `http://netstreaming.eu:4000/hd365`, compatibil cu linkurile Astra) — clienții noi pornesc pe keyframe, cu PAT/PMT în față
+- **Port propriu pe canal (ca la Astra):** `"port": "4003"` (sau `"192.168.88.247:4003"`) → `http://IP:4003/` — orice cale merge (`/astv`), HLS pe `http://IP:4003/index.m3u8`. Câmpul e și în panou, la editarea canalului; linkul scurt `:4000/<id>` rămâne valabil.
 - **HLS:** `http://IP:4000/<id>.m3u8` sau `http://IP:4000/<id>/index.m3u8` — segmente în memorie, tăiate pe keyframe
 - ID-ul nu ține cont de litere mari/mici (`/HD365` = `/hd365`); formele vechi `/play/<id>` și `/hls/<id>/index.m3u8` merg în continuare
 - canalele ne-publice cer `?token=<token>` la final

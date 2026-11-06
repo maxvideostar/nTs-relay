@@ -87,7 +87,9 @@ function rate(k){return k>=1000?(k/1000).toFixed(2)+' Mb/s':k+' kb/s';}
 function dur(s){if(!s)return '—';var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?d+'z '+h+'h':h?h+'h '+m+'m':m+'m '+(s%60)+'s';}
 function hex(p){var h=p.toString(16).toUpperCase();while(h.length<4)h='0'+h;return '0x'+h;}
 function tok(){return cfg.tokens&&cfg.tokens.length?cfg.tokens[0]:'';}
+function portBase(p){var i=p.lastIndexOf(':'),h=p.slice(0,i).replace(/^\[|\]$/g,'');return location.protocol+'//'+(h||location.hostname)+':'+p.slice(i+1);}
 function outs(c){var b=location.origin,q=(!c.public&&tok())?'?token='+encodeURIComponent(tok()):'',r=[];
+  if(c.port){var pb=portBase(c.port);if(c.http)r.push(['HTTP :'+c.port.split(':').pop(),pb+'/'+q]);if(c.hls)r.push(['HLS :'+c.port.split(':').pop(),pb+'/index.m3u8'+q]);}
   if(c.http)r.push(['HTTP',b+'/'+c.id+q]);if(c.hls)r.push(['HLS',b+'/'+c.id+'.m3u8'+q]);if(c.udp)r.push(['UDP',c.udp]);return r;}
 var view='ch',filt='';
 function setView(v){view=v;document.getElementById('t_ch').className=v==='ch'?'on':'';document.getElementById('t_cl').className=v==='cl'?'on':'';render();}
@@ -154,13 +156,15 @@ function editCh(id){
   '<label>Nume</label><input type="text" id="f_name" value="'+esc(c.name)+'" placeholder="HD365">'+
   '<label>Intrări (una pe linie, în ordinea priorității — următoarele sunt backup)</label><textarea id="f_in" placeholder="udp://eth0@239.1.1.1:1234">'+esc((c.inputs||[]).join('\n'))+'</textarea>'+
   '<div class="hint"><code>udp://[iface@]239.1.1.1:1234</code> · <code>…#pnr=101</code> (un program din MPTS) · <code>rtp://@239.1.1.1:5000</code> · <code>udp://0.0.0.0:5000</code><br><code>http://server/stream.ts</code> · <code>http://server/live.m3u8</code><br><code>srt://host:9000?mode=caller</code> · <code>srt://:9000?mode=listener</code><br><code>rtmp://host/app/key</code> · <code>rtmp-listen://0.0.0.0:1935/live/key</code><br>UDP/RTP/HTTP/HLS(.ts)/SRT păstrează PID-urile originale. RTMP și HLS fMP4 nu au PID-uri: primesc video 0x100, audio 0x101, PMT 0x1000 (prin ffmpeg).</div>'+
+  '<label>Port propriu (opțional, ca la Astra)</label><input type="text" id="f_port" value="'+esc(c.port||'')+'" placeholder="4003  sau  192.168.88.247:4003">'+
+  '<div class="hint">Canalul se ascultă și pe <code>http://server:PORT/</code> (orice cale merge, ex. <code>/astv</code>), HLS pe <code>/index.m3u8</code>. Gol = doar linkul scurt pe portul principal.</div>'+
   '<label>Ieșire UDP (opțional)</label><input type="text" id="f_udp" value="'+esc(c.udp)+'" placeholder="udp://eth1@239.10.0.1:1234?ttl=8">'+
   '<div class="chk"><label><input type="checkbox" id="f_en"'+(c.enabled?' checked':'')+'> Activ</label><label><input type="checkbox" id="f_http"'+(c.http?' checked':'')+'> HTTP-TS</label><label><input type="checkbox" id="f_hls"'+(c.hls?' checked':'')+'> HLS</label><label><input type="checkbox" id="f_pub"'+(c.public?' checked':'')+'> Public (fără token)</label></div>'+
   '<div class="msg" id="f_msg"></div><div class="foot"><button onclick="closeM()">Anulează</button><button class="pri" onclick="saveCh(\''+esc(n?'':c.id)+'\')">Salvează</button></div>');
 }
 function v(id){return document.getElementById(id);}
 function saveCh(old){
-  var b={id:v('f_id').value.trim(),name:v('f_name').value.trim(),inputs:v('f_in').value.split('\n'),udp:v('f_udp').value.trim(),enabled:v('f_en').checked,http:v('f_http').checked,hls:v('f_hls').checked,public:v('f_pub').checked};
+  var b={id:v('f_id').value.trim(),name:v('f_name').value.trim(),inputs:v('f_in').value.split('\n'),udp:v('f_udp').value.trim(),port:v('f_port').value.trim(),enabled:v('f_en').checked,http:v('f_http').checked,hls:v('f_hls').checked,public:v('f_pub').checked};
   api('POST','/api/channel'+(old?'?old='+encodeURIComponent(old):''),b).then(function(){closeM();return loadCfg();}).then(tick).catch(function(e){v('f_msg').textContent=e.message;});
 }
 function delCh(id){if(!confirm('Ștergi canalul '+id+'?'))return;api('DELETE','/api/channel?id='+encodeURIComponent(id)).then(loadCfg).then(tick);}

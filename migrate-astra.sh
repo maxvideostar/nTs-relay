@@ -204,34 +204,44 @@ for ch in raw:
         m = re.match(r'^https?://([^/:]*)(?::(\d+))?(/[^?#]*)?', base)
         sch = base.split("://")[0].lower()
         if sch in ("http", "https") and m:
-            ports[int(m.group(2) or 80)] += 1
+            prt = int(m.group(2) or 80)
+            ports[prt] += 1
             p = (m.group(3) or "/").strip("/")
             p = re.sub(r'\.ts$', '', p)
-            paths.append(p)
+            paths.append((p, prt))
         elif sch in ("udp", "rtp") and not udp_out:
             udp_out = base.replace("rtp://", "udp://")
         elif sch in ("udp", "rtp"):
             notes.append(f"ieșire UDP în plus, nu e preluată: {base}")
         else:
             notes.append(f"ieșire nesuportată, sărită: {u}")
-    ids = []
-    for p in paths:
+    ids = []   # (id, port, cale goală?)
+    for p, prt in paths:
         last = p.split("/")[-1] if p.startswith("play/") else p
-        if ID_RE.match(last): ids.append(last)
+        if ID_RE.match(last): ids.append((last, prt))
+        elif p == "": ids.append((slug(ch["aid"] or ch["name"]).lower(), prt))   # http://ip:4003/ → port propriu
         else: notes.append(f"calea /{p} nu poate fi păstrată identic (doar /nume, fără subfoldere)")
-    if not ids: ids = [slug(ch["aid"] or ch["name"])]
-    for k, cid in enumerate(ids):
+    if not ids: ids = [(slug(ch["aid"] or ch["name"]).lower(), None)]
+    for k, (cid, prt) in enumerate(ids):
         if cid.lower() in seen_ids:
             warn.append(f"[{label}] ID dublat /{cid} — sărit"); continue
         seen_ids.add(cid.lower())
         channels.append(dict(id=cid, name=ch["name"] or cid, enabled=bool(ch["enable"] and ins), inputs=ins,
-                             http=True, hls=True, udp=udp_out if k == 0 else "", public=True))
+                             http=True, hls=True, udp=udp_out if k == 0 else "", public=True, _port=prt))
         if not ins: notes.append("fără intrare utilizabilă — canalul e creat oprit")
     warn += [f"[{label}] {n}" for n in notes]
 
-port_list = [p for p, _ in ports.most_common()]
+# Portul principal = portul folosit de mai multe canale (http://server:4000/hd365); dacă fiecare canal
+# are portul lui (Astra: http://ip:4003/), principalul rămâne 4000 și fiecare canal primește "port" propriu.
+shared = [p for p, n in ports.most_common() if n > 1]
+listen = shared[0] if shared else 4000
+listen_extra = shared[1:]
+for c in channels:
+    prt = c.pop("_port")
+    if prt and prt != listen and prt not in listen_extra:
+        c["port"] = f":{prt}"
 plan = dict(procs=[(pid, a, cwd_of.get(pid, "/")) for pid, a in procs], units=units, autostart=autostart, files=cands, channels=channels, warnings=warn,
-            listen=port_list[0] if port_list else 4000, listen_extra=port_list[1:])
+            listen=listen, listen_extra=listen_extra)
 json.dump(plan, open(plan_path, "w"), indent=1)
 
 # ---------- raport
@@ -246,7 +256,8 @@ if not cands: print("  (niciunul)")
 print(f"\n=== Canale pentru StreamHub ({len(channels)}) ===")
 for c in channels:
     st = "" if c["enabled"] else "  [OPRIT]"
-    print(f"  :{plan['listen']}/{c['id']:<16} {c['name'][:24]:<24} ← {', '.join(c['inputs']) or '—'}{'  → ' + c['udp'] if c['udp'] else ''}{st}")
+    lnk = f"{c['port']}/" if c.get("port") else f":{plan['listen']}/{c['id']}"
+    print(f"  {lnk:<22} {c['name'][:24]:<24} ← {', '.join(c['inputs']) or '—'}{'  → ' + c['udp'] if c['udp'] else ''}{st}")
 print(f"\nPort principal: {plan['listen']}" + (f"   porturi suplimentare: {', '.join(map(str, plan['listen_extra']))}" if plan['listen_extra'] else ""))
 if warn:
     print("\n=== Atenție ===")
